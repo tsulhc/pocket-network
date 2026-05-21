@@ -17,12 +17,14 @@ import {
   pruneIndexedHeightCoverage,
   saveIndexedBlock,
   saveIndexedServices,
+  saveIndexedSupplierDomains,
   setDashboardCache,
   setIndexerState,
   setMeta,
   startJobRun,
   type IndexedSettlementFact,
-  type IndexedService
+  type IndexedService,
+  type IndexedSupplierDomain
 } from "@/lib/db";
 import type { TimeWindow } from "@/lib/types";
 
@@ -63,6 +65,16 @@ type RestServicesResponse = {
     name: string;
     compute_units_per_relay?: string | number | null;
     computeUnitsPerRelay?: string | number | null;
+  }>;
+  pagination?: { next_key?: string | null };
+};
+
+type RestSuppliersResponse = {
+  supplier?: Array<{
+    operator_address: string;
+    services?: Array<{
+      endpoints?: Array<{ url?: string | null }>;
+    }>;
   }>;
   pagination?: { next_key?: string | null };
 };
@@ -167,6 +179,7 @@ const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILE
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
+const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
 const SUPPLIER_REWARD_REASONS = new Set([
   "TLM_RELAY_BURN_EQUALS_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION",
   "TLM_GLOBAL_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION"
@@ -316,6 +329,44 @@ function hashIdentity(value: string): string {
   return crypto.createHash("sha256").update(`${HASH_SALT}:${value}`).digest("hex").slice(0, 32);
 }
 
+function getHostname(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isIpv4(hostname: string): boolean {
+  return /^\d+\.\d+\.\d+\.\d+$/.test(hostname);
+}
+
+function getRegistrableDomain(hostname: string): string {
+  if (hostname === "localhost" || isIpv4(hostname)) return hostname;
+
+  const labels = hostname.split(".").filter(Boolean);
+  if (labels.length <= 2) return hostname;
+
+  const suffix = labels.slice(-2).join(".");
+  if (SECOND_LEVEL_SUFFIXES.has(suffix) && labels.length >= 3) {
+    return labels.slice(-3).join(".");
+  }
+
+  return labels.slice(-2).join(".");
+}
+
+function getPrimaryEndpointDomain(endpointUrls: string[]): string | null {
+  const domainFrequency = new Map<string, number>();
+  for (const endpointUrl of endpointUrls) {
+    const hostname = getHostname(endpointUrl);
+    if (!hostname) continue;
+    const domain = getRegistrableDomain(hostname);
+    domainFrequency.set(domain, (domainFrequency.get(domain) ?? 0) + 1);
+  }
+
+  return Array.from(domainFrequency.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
+}
+
 function getTimeParts(blockTime: number): { day: string; hour: string } {
   const iso = new Date(blockTime).toISOString();
   return { day: iso.slice(0, 10), hour: iso.slice(0, 13) };
@@ -414,6 +465,45 @@ async function syncServices(): Promise<void> {
     logInfo("Service dimension synced", { serviceCount: services.length });
   } catch (error) {
     logWarn("Service dimension sync failed; existing labels will be reused", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+async function syncSupplierDomains(): Promise<void> {
+  const domains: IndexedSupplierDomain[] = [];
+  const unknownDomainHash = hashIdentity("domain:unknown");
+  let nextKey = "";
+
+  try {
+    while (true) {
+      const search = new URLSearchParams({ dehydrated: "false", "pagination.limit": "250" });
+      if (nextKey) search.set("pagination.key", nextKey);
+      const response = await fetchJson<RestSuppliersResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/supplier/supplier?${search.toString()}`);
+
+      for (const supplier of response.supplier ?? []) {
+        if (!supplier.operator_address) continue;
+        const endpointUrls = (supplier.services ?? []).flatMap((service) =>
+          (service.endpoints ?? []).flatMap((endpoint) => (endpoint.url ? [endpoint.url] : []))
+        );
+        const domain = getPrimaryEndpointDomain(endpointUrls);
+        domains.push({
+          supplierHash: hashIdentity(supplier.operator_address),
+          domainHash: domain ? hashIdentity(`domain:${domain}`) : unknownDomainHash,
+          hasEndpoint: Boolean(domain)
+        });
+      }
+
+      nextKey = response.pagination?.next_key ?? "";
+      if (!nextKey) break;
+    }
+
+    saveIndexedSupplierDomains(domains);
+    logInfo("Supplier domain dimension synced", {
+      supplierCount: domains.length,
+      domainCount: new Set(domains.map((entry) => entry.domainHash)).size,
+      unknownSupplierCount: domains.filter((entry) => !entry.hasEndpoint).length
+    });
+  } catch (error) {
+    logWarn("Supplier domain sync failed; existing domain dimension will be reused", { error: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -885,6 +975,12 @@ async function runLiveStartupTasks(): Promise<void> {
   }
 
   try {
+    await syncSupplierDomains();
+  } catch (error) {
+    logError("Supplier domain sync failed during live startup", error);
+  }
+
+  try {
     await runLiveCatchup(500);
     pruneIndexerData(RETENTION_DAYS);
   } catch (error) {
@@ -998,6 +1094,7 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
     }
 
     await syncServices();
+    await syncSupplierDomains();
     await runCatchup(options);
     pruneIndexerData(RETENTION_DAYS);
     finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt });

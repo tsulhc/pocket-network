@@ -28,6 +28,12 @@ export type IndexedService = {
   computeUnitsPerRelay: number | null;
 };
 
+export type IndexedSupplierDomain = {
+  supplierHash: string;
+  domainHash: string;
+  hasEndpoint: boolean;
+};
+
 export type IndexedHeightStatus = "indexed" | "empty" | "failed";
 
 export type IndexedHeightCoverage = {
@@ -116,6 +122,13 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS supplier_domain_dim (
+    supplier_hash TEXT PRIMARY KEY,
+    domain_hash TEXT NOT NULL,
+    has_endpoint INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS settlement_facts (
     height INTEGER NOT NULL,
     event_index INTEGER NOT NULL,
@@ -143,6 +156,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS settlement_facts_service_time_idx ON settlement_facts(service_id, block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_day_idx ON settlement_facts(day);
   CREATE INDEX IF NOT EXISTS settlement_facts_supplier_time_idx ON settlement_facts(supplier_hash, block_time);
+  CREATE INDEX IF NOT EXISTS supplier_domain_dim_domain_idx ON supplier_domain_dim(domain_hash);
   CREATE INDEX IF NOT EXISTS indexed_heights_status_idx ON indexed_heights(status, height);
 `);
 
@@ -229,6 +243,17 @@ const upsertServiceStatement = db.prepare(
   `
 );
 
+const upsertSupplierDomainStatement = db.prepare(
+  `
+    INSERT INTO supplier_domain_dim (supplier_hash, domain_hash, has_endpoint, updated_at)
+    VALUES (@supplier_hash, @domain_hash, @has_endpoint, @updated_at)
+    ON CONFLICT(supplier_hash) DO UPDATE SET
+      domain_hash = excluded.domain_hash,
+      has_endpoint = excluded.has_endpoint,
+      updated_at = excluded.updated_at
+  `
+);
+
 const insertSettlementFactStatement = db.prepare(
   `
     INSERT OR IGNORE INTO settlement_facts (
@@ -306,9 +331,10 @@ const selectServiceAggregatesStatement = db.prepare(
       SUM(facts.relays) AS relays,
       CAST(SUM(CAST(facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
       COUNT(DISTINCT facts.supplier_hash) AS supplier_count,
-      COUNT(DISTINCT COALESCE(facts.owner_hash, facts.supplier_hash)) AS provider_count
+      COUNT(DISTINCT COALESCE(supplier_domain_dim.domain_hash, facts.owner_hash, facts.supplier_hash)) AS provider_count
     FROM settlement_facts facts
     LEFT JOIN service_dim ON service_dim.service_id = facts.service_id
+    LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = facts.supplier_hash
     WHERE facts.block_time >= ?
     GROUP BY facts.service_id
     HAVING relays > 0 OR CAST(revenue_upokt AS INTEGER) > 0
@@ -319,13 +345,14 @@ const selectServiceAggregatesStatement = db.prepare(
 const selectProviderAggregatesStatement = db.prepare(
   `
     SELECT
-      COALESCE(owner_hash, supplier_hash) AS supplier_hash,
-      SUM(relays) AS relays,
-      CAST(SUM(CAST(revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
-      COUNT(DISTINCT service_id) AS service_count
+      COALESCE(supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash) AS supplier_hash,
+      SUM(settlement_facts.relays) AS relays,
+      CAST(SUM(CAST(settlement_facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
+      COUNT(DISTINCT settlement_facts.service_id) AS service_count
     FROM settlement_facts
-    WHERE block_time >= ?
-    GROUP BY COALESCE(owner_hash, supplier_hash)
+    LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = settlement_facts.supplier_hash
+    WHERE settlement_facts.block_time >= ?
+    GROUP BY COALESCE(supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash)
     HAVING relays > 0 OR CAST(revenue_upokt AS INTEGER) > 0
     ORDER BY CAST(revenue_upokt AS INTEGER) DESC, relays DESC
   `
@@ -519,6 +546,21 @@ export function saveIndexedServices(services: IndexedService[]): void {
     }
   });
   transaction(services);
+}
+
+export function saveIndexedSupplierDomains(domains: IndexedSupplierDomain[]): void {
+  const now = new Date().toISOString();
+  const transaction = db.transaction((entries: IndexedSupplierDomain[]) => {
+    for (const entry of entries) {
+      upsertSupplierDomainStatement.run({
+        supplier_hash: entry.supplierHash,
+        domain_hash: entry.domainHash,
+        has_endpoint: entry.hasEndpoint ? 1 : 0,
+        updated_at: now
+      });
+    }
+  });
+  transaction(domains);
 }
 
 export function getIndexedServiceAggregates(sinceUnixMs: number): IndexedServiceAggregate[] {
