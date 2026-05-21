@@ -81,37 +81,39 @@ Optional overrides:
 
 ```bash
 npm install
-npm run ingest
+npm run indexer:once
 npm run dev
 ```
 
-Then open `http://localhost:3000`.
+Then open `http://localhost:3101`.
 
-The UI reads local SQLite snapshots only. Run `npm run ingest` before opening the app on a fresh database.
+The UI reads local SQLite snapshots only. Run `npm run indexer:once` before opening the app on a fresh database.
 
 ## Production Runtime
 
-Run the web process and ingestion worker separately:
+Run the web process and indexer separately:
 
 ```bash
 npm run build
 npm run start
-npm run worker
+npm run indexer
 ```
 
 With PM2:
 
 ```bash
-pm2 start npm --name pocket-dashboard -- run start
-pm2 start npm --name pocket-worker -- run worker
+POCKET_SQLITE_PATH=/root/pocket-provider-dashboard/data/pocket-provider-dashboard.sqlite pm2 start npm --name pocket-dashboard-provider -- run start
+POCKET_SQLITE_PATH=/root/pocket-provider-dashboard/data/pocket-provider-dashboard.sqlite pm2 start npm --name pocket-indexer-provider -- run indexer
 ```
 
-The worker owns all Poktscan/RPC requests and writes dashboard snapshots to SQLite. The Next.js request path does not call Poktscan directly.
+This branch serves on port `3101` so it can run beside `main` on port `3100`. Use a separate `POCKET_SQLITE_PATH` for the provider deployment so public and provider dashboards do not share cache or indexer state.
 
-Optional worker interval override:
+The indexer owns live Pocket RPC ingestion, newest-first repair/backfill, supplier identity sync, and dashboard snapshot writes. The Next.js request path reads SQLite snapshots only.
+
+Legacy worker fallback remains available but is not the preferred production path:
 
 ```bash
-POCKET_INGEST_INTERVAL_MS=3600000 npm run worker
+npm run worker
 ```
 
 ## Verification
