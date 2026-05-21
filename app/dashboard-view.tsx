@@ -535,9 +535,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
           </div>
           <DomainDistribution data={data} />
         </article>
-      </section>
 
-      <section className="section-grid">
         <article className="panel section themed section-theme-revenue">
           <div className="section-title-row">
             <div>
