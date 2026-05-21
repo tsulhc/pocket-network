@@ -247,6 +247,8 @@ const UI_MEMORY_CACHE_TTL_MS = Number(process.env.POCKET_UI_MEMORY_CACHE_MS ?? 3
 const SUPPLIER_DIRECTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_RPC_TIMEOUT_MS = 5_000;
 const BLOCK_RESULTS_TIMEOUT_MS = 8_000;
+const PRICE_TIMEOUT_MS = Number(process.env.POCKET_PRICE_TIMEOUT_MS ?? 20_000);
+const PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=pocket-network&vs_currencies=usd";
 const POKTSCAN_TIMEOUT_MS = 15_000;
 const POKTSCAN_MAX_ATTEMPTS = 4;
 const POKTSCAN_MAX_CONCURRENCY = 2;
@@ -453,12 +455,14 @@ async function fetchJsonFromRpcPool<T>(path: string, options?: { seed?: number; 
   throw lastError instanceof Error ? lastError : new Error(`All RPC requests failed for path ${path}`);
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, timeoutMs?: number): Promise<T> {
   const response = await fetch(url, {
     headers: {
-      accept: "application/json"
+      accept: "application/json",
+      "user-agent": "pocket-dashboard/1.0"
     },
-    cache: "no-store"
+    cache: "no-store",
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
   });
 
   if (!response.ok) {
@@ -646,9 +650,7 @@ async function getPoktPriceUsd(): Promise<number> {
   }
 
   try {
-    const response = await fetchJson<CoinGeckoPriceResponse>(
-      "https://api.coingecko.com/api/v3/simple/price?ids=pocket-network&vs_currencies=usd"
-    );
+    const response = await fetchJson<CoinGeckoPriceResponse>(PRICE_URL, PRICE_TIMEOUT_MS);
     const value = response["pocket-network"]?.usd ?? 0;
 
     priceCache = { value, expiresAt: Date.now() + CACHE_TTL_MS };

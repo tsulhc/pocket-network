@@ -158,6 +158,8 @@ const BACKFILL_CONCURRENCY = Number(process.env.POCKET_INDEXER_BACKFILL_CONCURRE
 const BACKFILL_BATCH_SIZE = Number(process.env.POCKET_INDEXER_BACKFILL_BATCH_SIZE ?? 500);
 const LIVE_CATCHUP_MAX_BLOCKS = Number(process.env.POCKET_INDEXER_LIVE_CATCHUP_MAX_BLOCKS ?? 1_000);
 const BLOCK_RETRIES = Number(process.env.POCKET_INDEXER_BLOCK_RETRIES ?? 5);
+const PRICE_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_PRICE_TIMEOUT_MS ?? 20_000);
+const PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=pocket-network&vs_currencies=usd";
 const REPAIR_INTERVAL_MS = Number(process.env.POCKET_INDEXER_REPAIR_INTERVAL_MS ?? 60_000);
 const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ?? 250);
 const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 4);
@@ -238,7 +240,14 @@ function wsUrlFromRpc(rpcUrl: string): string {
 }
 
 async function fetchJson<T>(url: string, timeoutMs = RPC_TIMEOUT_MS): Promise<T> {
-  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: {
+      accept: "application/json",
+      "user-agent": "pocket-dashboard/1.0"
+    },
+    signal: AbortSignal.timeout(timeoutMs)
+  });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} from ${url}`);
   }
@@ -442,10 +451,7 @@ async function refreshPrice(): Promise<number> {
   }
 
   try {
-    const data = await fetchJson<{ "pocket-network"?: { usd?: number } }>(
-      "https://api.coingecko.com/api/v3/simple/price?ids=pocket-network&vs_currencies=usd",
-      5_000
-    );
+    const data = await fetchJson<{ "pocket-network"?: { usd?: number } }>(PRICE_URL, PRICE_TIMEOUT_MS);
     const value = data["pocket-network"]?.usd;
     if (typeof value === "number" && Number.isFinite(value)) {
       setIndexerState("pokt_price_usd", JSON.stringify({ value, updatedAt: new Date().toISOString() }));

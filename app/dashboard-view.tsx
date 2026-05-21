@@ -535,22 +535,6 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
           </div>
           <DomainDistribution data={data} />
         </article>
-
-        <article className="panel section themed section-theme-integrity">
-          <div className="section-title-row">
-            <div>
-              <h2 className="section-title">Data Methodology</h2>
-              <p className="section-subtitle">How this public surface stays neutral.</p>
-            </div>
-            <span className="pill">Safety</span>
-          </div>
-          <div className="insight-list">
-            <div className="insight-row"><span className="muted">Source</span><strong>EventClaimSettled</strong></div>
-            <div className="insight-row"><span className="muted">Visibility</span><strong>Network aggregates only</strong></div>
-            <div className="insight-row"><span className="muted">Privacy</span><strong>No named provider data</strong></div>
-            <div className="insight-row"><span className="muted">Access</span><strong>Public SQLite snapshots</strong></div>
-          </div>
-        </article>
       </section>
 
       <section className="section-grid">

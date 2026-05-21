@@ -319,13 +319,13 @@ const selectServiceAggregatesStatement = db.prepare(
 const selectProviderAggregatesStatement = db.prepare(
   `
     SELECT
-      supplier_hash,
+      COALESCE(owner_hash, supplier_hash) AS supplier_hash,
       SUM(relays) AS relays,
       CAST(SUM(CAST(revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
       COUNT(DISTINCT service_id) AS service_count
     FROM settlement_facts
     WHERE block_time >= ?
-    GROUP BY supplier_hash
+    GROUP BY COALESCE(owner_hash, supplier_hash)
     HAVING relays > 0 OR CAST(revenue_upokt AS INTEGER) > 0
     ORDER BY CAST(revenue_upokt AS INTEGER) DESC, relays DESC
   `
