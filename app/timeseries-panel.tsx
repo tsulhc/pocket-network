@@ -15,6 +15,8 @@ type TimeseriesPanelProps = {
   theme?: "revenue" | "demand" | "integrity" | "privacy";
 };
 
+const MAX_DISPLAY_DAYS = 30;
+
 function buildLinePath(points: TimeseriesPoint[], maxValue: number): string {
   if (points.length === 0 || maxValue === 0) return "";
 
@@ -37,15 +39,16 @@ export default function TimeseriesPanel({
   emptyText = "Timeseries data is not available yet.",
   theme
 }: TimeseriesPanelProps) {
-  const hasData = points.some((point) => point.value > 0 || (point.secondaryValue ?? 0) > 0);
-  const maxValue = Math.max(...points.map((point) => Math.max(point.value, point.secondaryValue ?? 0)), 0);
-  const latestPoint = points.at(-1);
-  const previousPoint = points.at(-2);
-  const totalValue = points.reduce((sum, point) => sum + point.value, 0);
+  const displayPoints = points.slice(-MAX_DISPLAY_DAYS);
+  const hasData = displayPoints.some((point) => point.value > 0 || (point.secondaryValue ?? 0) > 0);
+  const maxValue = Math.max(...displayPoints.map((point) => Math.max(point.value, point.secondaryValue ?? 0)), 0);
+  const latestPoint = displayPoints.at(-1);
+  const previousPoint = displayPoints.at(-2);
+  const totalValue = displayPoints.reduce((sum, point) => sum + point.value, 0);
   const latestChange = latestPoint && previousPoint && previousPoint.value > 0
     ? ((latestPoint.value / previousPoint.value) - 1) * 100
     : 0;
-  const linePath = buildLinePath(points, maxValue);
+  const linePath = buildLinePath(displayPoints, maxValue);
   const themeClass = theme ? `themed section-theme-${theme}` : "";
 
   return (
@@ -56,7 +59,7 @@ export default function TimeseriesPanel({
           <h2 className="section-title">{title}</h2>
           <p className="section-subtitle">{subtitle}</p>
         </div>
-        <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last {points.length} Days</span>
+        <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last {displayPoints.length} Days</span>
       </div>
 
       {hasData ? (
@@ -82,7 +85,7 @@ export default function TimeseriesPanel({
             <svg className="timeseries-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" style={{ opacity: 0.8 }}>
               <path d={linePath} />
             </svg>
-            {points.map((point) => {
+            {displayPoints.map((point) => {
               const height = maxValue === 0 ? 2 : Math.max(4, Math.round((point.value / maxValue) * 100));
               const isActive = point === latestPoint;
               
