@@ -7,7 +7,31 @@ import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, 
 import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS } from "@/lib/opportunities";
 import type { SerializedDashboardData, SerializedServiceStats } from "@/lib/types";
 
-type SortKey = "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "revenuePerProvider" | "opportunity";
+type SortKey = "service" | "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "revenuePerProvider" | "opportunity";
+type SortDirection = "asc" | "desc";
+
+type SortColumn = {
+  key: SortKey;
+  label: string;
+  align?: "right";
+  defaultDirection?: SortDirection;
+  tooltip?: string;
+};
+
+const SORT_COLUMNS: SortColumn[] = [
+  { key: "service", label: "Service Identity", defaultDirection: "asc" },
+  { key: "revenue", label: "Revenue (30d)", align: "right" },
+  { key: "relays", label: "Final Relays", align: "right" },
+  { key: "providers", label: "Domains", align: "right" },
+  { key: "suppliers", label: "Suppliers", align: "right" },
+  { key: "revenuePerProvider", label: "Avg Domain Reward", align: "right" },
+  {
+    key: "opportunity",
+    label: "Demand Signal",
+    align: "right",
+    tooltip: "The higher the score, the more potential for providers to profit from participating in this network."
+  }
+];
 
 type ChainsExplorerViewProps = {
   data: SerializedDashboardData | null;
@@ -25,8 +49,10 @@ function onboardingOpportunityScore(service: SerializedServiceStats): number {
   return buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS).opportunityScore;
 }
 
-function getSortValue(service: SerializedServiceStats, sort: SortKey): number | bigint {
+function getSortValue(service: SerializedServiceStats, sort: SortKey): string | number | bigint {
   switch (sort) {
+    case "service":
+      return service.serviceName;
     case "revenue":
       return BigInt(service.revenueUpokt);
     case "relays":
@@ -44,19 +70,48 @@ function getSortValue(service: SerializedServiceStats, sort: SortKey): number | 
   }
 }
 
-function compareSortValue(a: number | bigint, b: number | bigint): number {
-  if (typeof a === "bigint" || typeof b === "bigint") {
-    const aBig = typeof a === "bigint" ? a : BigInt(Math.trunc(a));
-    const bBig = typeof b === "bigint" ? b : BigInt(Math.trunc(b));
-    return bBig === aBig ? 0 : bBig > aBig ? 1 : -1;
+function compareSortValue(a: string | number | bigint, b: string | number | bigint, direction: SortDirection): number {
+  const multiplier = direction === "asc" ? 1 : -1;
+
+  if (typeof a === "string" && typeof b === "string") {
+    return a.localeCompare(b) * multiplier;
   }
 
-  return b - a;
+  if (typeof a === "bigint" || typeof b === "bigint") {
+    const aBig = typeof a === "bigint" ? a : BigInt(Math.trunc(Number(a)));
+    const bBig = typeof b === "bigint" ? b : BigInt(Math.trunc(Number(b)));
+    if (aBig === bBig) return 0;
+    return (aBig > bBig ? 1 : -1) * multiplier;
+  }
+
+  return (Number(a) - Number(b)) * multiplier;
+}
+
+function getSortDirectionLabel(direction: SortDirection): string {
+  return direction === "asc" ? "ascending" : "descending";
 }
 
 export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("opportunity");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  function updateSort(nextSort: SortKey, nextDirection?: SortDirection) {
+    if (nextDirection) {
+      setSort(nextSort);
+      setSortDirection(nextDirection);
+      return;
+    }
+
+    if (nextSort === sort) {
+      setSortDirection((current) => current === "asc" ? "desc" : "asc");
+      return;
+    }
+
+    const column = SORT_COLUMNS.find((entry) => entry.key === nextSort);
+    setSort(nextSort);
+    setSortDirection(column?.defaultDirection ?? "desc");
+  }
 
   const services = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -65,8 +120,8 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         if (!normalizedQuery) return true;
         return [service.serviceName, service.serviceId].some((value) => value.toLowerCase().includes(normalizedQuery));
       })
-      .sort((a, b) => compareSortValue(getSortValue(a, sort), getSortValue(b, sort)) || a.serviceName.localeCompare(b.serviceName));
-  }, [data?.services, query, sort]);
+      .sort((a, b) => compareSortValue(getSortValue(a, sort), getSortValue(b, sort), sortDirection) || a.serviceName.localeCompare(b.serviceName));
+  }, [data?.services, query, sort, sortDirection]);
   const totalComputeUnits = data?.services.reduce((sum, service) => sum + (service.computeUnits ?? 0), 0) ?? 0;
 
   if (!data) {
@@ -141,7 +196,8 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
           
           <div className="explorer-select">
             <span className="hero-highlight-label">Sort Objective</span>
-            <select value={sort} onChange={(event) => setSort(event.target.value as SortKey)}>
+            <select value={sort} onChange={(event) => updateSort(event.target.value as SortKey, SORT_COLUMNS.find((entry) => entry.key === event.target.value)?.defaultDirection ?? "desc")}>
+              <option value="service">Service Identity</option>
               <option value="opportunity">Demand Signal</option>
               <option value="revenue">Total Revenue</option>
               <option value="relays">Relay Volume</option>
@@ -157,13 +213,36 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
           <table className="mini-table explorer-table">
             <thead>
               <tr>
-                <th>Service Identity</th>
-                <th className="right">Revenue (30d)</th>
-                <th className="right">Final Relays</th>
-                <th className="right">Domains</th>
-                <th className="right">Suppliers</th>
-                <th className="right">Avg Domain Reward</th>
-                <th className="right">Demand Signal</th>
+                {SORT_COLUMNS.map((column) => {
+                  const active = column.key === sort;
+                  const ariaSort = active ? (sortDirection === "asc" ? "ascending" : "descending") : "none";
+
+                  return (
+                    <th key={column.key} className={column.align} aria-sort={ariaSort}>
+                      <button
+                        type="button"
+                        className={`table-sort-button${active ? " active" : ""}`}
+                        onClick={() => updateSort(column.key)}
+                        aria-label={`Sort by ${column.label} ${active ? `currently ${getSortDirectionLabel(sortDirection)}` : ""}`}
+                      >
+                        <span>{column.label}</span>
+                        {column.tooltip && (
+                          <span className="info-tooltip" onClick={(event) => event.stopPropagation()}>
+                            <span
+                              className="info-tooltip-trigger"
+                              tabIndex={0}
+                              aria-label={column.tooltip}
+                            >
+                              ?
+                            </span>
+                            <span className="info-tooltip-content" role="tooltip">{column.tooltip}</span>
+                          </span>
+                        )}
+                        <span className="sort-indicator" aria-hidden="true">{active ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                      </button>
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
