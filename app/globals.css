@@ -1437,8 +1437,8 @@ code {
 .info-tooltip-content {
   position: absolute;
   right: 0;
-  bottom: calc(100% + 10px);
-  z-index: 20;
+  top: calc(100% + 10px);
+  z-index: 100;
   width: min(280px, 70vw);
   padding: 12px 14px;
   border: 1px solid var(--border-strong);
