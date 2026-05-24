@@ -69,8 +69,8 @@ function movingAverage(values: number[], windowSize: number): number[] {
   });
 }
 
-function getRevenuePerThousandRelays(service: SerializedServiceStats): number {
-  return service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1000;
+function getRevenuePerMillionRelays(service: SerializedServiceStats): number {
+  return service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1_000_000;
 }
 
 function getSupplierDensityLabel(service: SerializedServiceStats): string {
@@ -142,7 +142,7 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
         const width = Math.max(8, Math.round((toPoktNumber(service.revenueUpokt) / maxRevenue) * 100));
         const share = getShare(service.revenueUpokt, totalRevenue);
         const density = (service.supplierCount ?? 0) <= 25 ? "low" : (service.supplierCount ?? 0) <= 75 ? "medium" : "high";
-        const revenuePerThousandRelays = getRevenuePerThousandRelays(service);
+        const revenuePerMillionRelays = getRevenuePerMillionRelays(service);
 
         return (
           <div key={service.serviceId} className="opportunity-card">
@@ -160,8 +160,8 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
               <strong className="accent-number">{formatUpokt(BigInt(service.revenueUpokt), 1)}</strong>
             </div>
             <div className="opportunity-metric-row">
-              <span className="muted">Reward / 1k relays</span>
-              <strong className="accent-number" style={{ color: 'var(--green)' }}>{formatDecimal(revenuePerThousandRelays, 2)} POKT</strong>
+              <span className="muted">Reward / 1M relays</span>
+              <strong className="accent-number" style={{ color: 'var(--green)' }}>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong>
             </div>
             <div className="opportunity-track" style={{ margin: '16px 0' }}>
               <div className="opportunity-fill" style={{ width: `${width}%` }} />
@@ -318,7 +318,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
   const topService = data.services[0];
   const averageRevenuePerProvider = data.activeProviders === 0 ? 0 : toPoktNumber(data.totalRevenueUpokt) / data.activeProviders;
   const medianRevenuePerProvider = median(data.providers.map((provider) => toPoktNumber(provider.revenueUpokt)));
-  const revenuePerThousandRelays = data.totalRelays === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1000;
+  const revenuePerMillionRelays = data.totalRelays === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000;
   const top5ProviderShare = getShare(
     data.providers.slice(0, 5).reduce((sum, provider) => sum + BigInt(provider.revenueUpokt), 0n).toString(),
     data.totalRevenueUpokt
@@ -329,7 +329,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
   );
   const totalRevenueUsd = toUsdFromUpokt(data.totalRevenueUpokt, data.poktPriceUsd);
   const averageRevenuePerProviderUsd = averageRevenuePerProvider * data.poktPriceUsd;
-  const revenuePerThousandRelaysUsd = revenuePerThousandRelays * data.poktPriceUsd;
+  const revenuePerMillionRelaysUsd = revenuePerMillionRelays * data.poktPriceUsd;
   const indexerLag =
     data.indexerTargetHeight != null && data.indexerProcessedHeight != null
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
@@ -418,10 +418,10 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
             <h2>Network insights.</h2>
             <ul className="narrative-points">
               <li>
-                <strong>{formatDecimal(revenuePerThousandRelays, 2)} POKT</strong> earned per 1k relays in this window.
+                <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M relays in this window.
               </li>
               <li>
-                <strong>{formatUsd(revenuePerThousandRelaysUsd, 2)}</strong> estimated value per 1,000 relays.
+                <strong>{formatUsd(revenuePerMillionRelaysUsd, 2)}</strong> estimated value per 1M relays.
               </li>
               <li>
                 <strong>{formatDecimal(medianRevenuePerProvider, 1)} POKT</strong> median benchmark for active domains.
@@ -483,8 +483,8 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
         </article>
         <article className="panel kpi">
           <span className="kpi-label">Unit Revenue</span>
-          <span className="kpi-value" style={{ color: 'var(--accent)' }}>{formatDecimal(revenuePerThousandRelays, 2)} POKT</span>
-          <span className="kpi-foot">Per 1k relays</span>
+          <span className="kpi-value" style={{ color: 'var(--accent)' }}>{formatDecimal(revenuePerMillionRelays, 2)} POKT</span>
+          <span className="kpi-foot">Per 1M relays</span>
         </article>
       </section>
 

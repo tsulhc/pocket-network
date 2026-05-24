@@ -50,7 +50,7 @@ export default async function RewardsPage() {
   const averageReward = data.activeProviders === 0 ? 0 : toPoktNumber(data.totalRevenueUpokt) / data.activeProviders;
   const top5ProviderRewards = data.providers.slice(0, 5).reduce((sum, provider) => sum + provider.revenueUpokt, 0n);
   const top5ServiceRewards = data.services.slice(0, 5).reduce((sum, service) => sum + service.revenueUpokt, 0n);
-  const rewardPerRelay = data.totalRelays === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1000;
+  const rewardPerMillionRelays = data.totalRelays === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000;
   const rewardHistoryValues = history.map((point) => toPoktNumber(point.revenueUpokt));
   const rewardHistoryAverage = movingAverage(rewardHistoryValues, 7);
   const rewardHistoryPoints = history.map((point, index) => ({
@@ -90,8 +90,8 @@ export default async function RewardsPage() {
             <strong style={{ color: 'var(--text)' }}>{formatCompactUsd(toPoktNumber(data.totalRevenueUpokt) * data.poktPriceUsd, 1)}</strong>
           </article>
           <article className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
-            <span className="hero-highlight-label">Yield / 1k Relays</span>
-            <strong style={{ color: 'var(--green)' }}>{formatDecimal(rewardPerRelay, 2)} POKT</strong>
+            <span className="hero-highlight-label">Yield / 1M Relays</span>
+            <strong style={{ color: 'var(--green)' }}>{formatDecimal(rewardPerMillionRelays, 2)} POKT</strong>
           </article>
         </div>
       </section>

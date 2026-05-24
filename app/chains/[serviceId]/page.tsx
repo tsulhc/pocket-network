@@ -75,7 +75,7 @@ export default async function ChainDetailPage({ params }: PageProps) {
   }));
   const revenuePerProvider = toPoktNumber(service.revenueUpokt) / Math.max(service.providerCount, 1);
   const suppliersPerDomain = (service.supplierCount ?? 0) / Math.max(service.providerCount, 1);
-  const revenuePerThousandRelays = service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1000;
+  const revenuePerMillionRelays = service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1_000_000;
 
   return (
     <main className="page explorer-page">
@@ -132,8 +132,8 @@ export default async function ChainDetailPage({ params }: PageProps) {
         </article>
         <article className="panel kpi">
           <span className="kpi-label">Monetization density</span>
-          <span className="kpi-value" style={{ color: 'var(--accent)' }}>{formatDecimal(revenuePerThousandRelays, 2)} POKT</span>
-          <span className="kpi-foot">Revenue per 1,000 relays</span>
+          <span className="kpi-value" style={{ color: 'var(--accent)' }}>{formatDecimal(revenuePerMillionRelays, 2)} POKT</span>
+          <span className="kpi-foot">Revenue per 1M relays</span>
         </article>
         <article className="panel kpi">
           <span className="kpi-label">Market influence</span>
