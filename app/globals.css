@@ -24,8 +24,8 @@
   --panel-soft: rgba(255, 255, 255, 0.04);
   --border: #2E3A55;
   --border-strong: rgba(255, 255, 255, 0.16);
-  --text: #FFFFFF;
-  --muted: #A0AECC;
+  --text: #F8FAFC;
+  --muted: #CBD5E1;
   --accent: var(--cyan-accent);
   --accent-strong: var(--blue-primary);
   --green: #00D1A0;
@@ -64,7 +64,8 @@ body {
   background: var(--bg);
   font-family: var(--font-main);
   -webkit-font-smoothing: antialiased;
-  line-height: 1.5;
+  font-size: 1rem;
+  line-height: 1.7;
 }
 
 a {
@@ -330,8 +331,8 @@ code {
 .opportunity-foot,
 .hero-highlight p {
   color: var(--muted);
-  line-height: 1.6;
-  font-size: 0.95rem;
+  line-height: 1.75;
+  font-size: 1rem;
 }
 
 .window-tabs {
