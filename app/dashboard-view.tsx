@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 
-import TimeseriesPanel from "@/app/timeseries-panel";
 import {
   formatCompactNumber,
   formatDecimal,
@@ -61,14 +60,6 @@ function median(numbers: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
-function movingAverage(values: number[], windowSize: number): number[] {
-  return values.map((_, index) => {
-    const start = Math.max(0, index - windowSize + 1);
-    const slice = values.slice(start, index + 1);
-    return slice.reduce((sum, value) => sum + value, 0) / slice.length;
-  });
-}
-
 function getRevenuePerMillionRelays(service: SerializedServiceStats): number {
   return service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1_000_000;
 }
@@ -96,6 +87,106 @@ function buildDomainBuckets(providers: SerializedDashboardData["providers"]): Ar
   }
 
   return buckets.map(({ label, count, revenue }) => ({ label, count, revenue }));
+}
+
+function buildNetworkTrendPath(points: Array<{ revenue: number }>, maxRevenue: number): string {
+  if (points.length === 0 || maxRevenue === 0) return "";
+
+  return points
+    .map((point, index) => {
+      const x = points.length === 1 ? 50 : (index / (points.length - 1)) * 100;
+      const y = 100 - (Math.max(0, point.revenue) / maxRevenue) * 100;
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+}
+
+function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistoryPoint[] }) {
+  const trendPoints = history.slice(-30).map((point) => ({
+    day: point.day,
+    revenue: toPoktNumber(point.revenueUpokt),
+    relays: point.relays
+  }));
+  const maxRevenue = Math.max(...trendPoints.map((point) => point.revenue), 0);
+  const maxRelays = Math.max(...trendPoints.map((point) => point.relays), 0);
+  const latestPoint = trendPoints.at(-1);
+  const totalRevenue = trendPoints.reduce((sum, point) => sum + point.revenue, 0);
+  const totalRelays = trendPoints.reduce((sum, point) => sum + point.relays, 0);
+  const linePath = buildNetworkTrendPath(trendPoints, maxRevenue);
+  const hasData = trendPoints.some((point) => point.revenue > 0 || point.relays > 0);
+
+  return (
+    <section className="panel section network-trend-panel themed section-theme-demand" style={{ position: 'relative' }}>
+      <div className="section-title-row">
+        <div>
+          <span className="eyebrow eyebrow-ghost">Market</span>
+          <h2 className="section-title">Network Trend</h2>
+          <p className="section-subtitle">Daily rewards and finalized relay demand over the last 30 days.</p>
+        </div>
+        <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last {trendPoints.length} Days</span>
+      </div>
+
+      {hasData ? (
+        <>
+          <div className="network-trend-metrics">
+            <div className="panel-inset">
+              <span className="hero-highlight-label">Latest Rewards</span>
+              <strong style={{ color: 'var(--yellow-primary)' }}>{latestPoint ? `${formatDecimal(latestPoint.revenue, 1)} POKT` : "n/a"}</strong>
+            </div>
+            <div className="panel-inset">
+              <span className="hero-highlight-label">Latest Relays</span>
+              <strong style={{ color: 'var(--green)' }}>{latestPoint ? formatCompactNumber(latestPoint.relays) : "n/a"}</strong>
+            </div>
+            <div className="panel-inset">
+              <span className="hero-highlight-label">Window Rewards</span>
+              <strong>{formatDecimal(totalRevenue, 1)} POKT</strong>
+            </div>
+            <div className="panel-inset">
+              <span className="hero-highlight-label">Window Relays</span>
+              <strong>{formatCompactNumber(totalRelays)}</strong>
+            </div>
+          </div>
+
+          <div className="network-trend-chart" aria-label="Network revenue and relay trend chart">
+            <svg className="network-trend-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <path d={linePath} />
+            </svg>
+            {trendPoints.map((point) => {
+              const height = maxRelays === 0 ? 2 : Math.max(4, Math.round((point.relays / maxRelays) * 100));
+              const isActive = point === latestPoint;
+
+              return (
+                <div key={point.day} className="network-trend-bar-group" title={`${point.day}: ${formatCompactNumber(point.relays)} relays, ${formatDecimal(point.revenue, 1)} POKT`}>
+                  <div
+                    className="network-trend-bar"
+                    style={{
+                      height: `${height}%`,
+                      background: isActive ? 'linear-gradient(180deg, var(--green), rgba(25, 195, 125, 0.25))' : undefined,
+                      boxShadow: isActive ? '0 0 20px rgba(25, 195, 125, 0.25)' : undefined
+                    }}
+                  />
+                  <span>{point.day.slice(5)}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="footer-note network-trend-legend">
+            <span>
+              <span className="network-trend-legend-bar" />
+              Daily relays
+            </span>
+            <span>
+              <span className="network-trend-legend-line" />
+              Daily rewards
+            </span>
+          </p>
+        </>
+      ) : (
+        <p className="footer-note">Network history is currently unavailable.</p>
+      )}
+    </section>
+  );
 }
 
 function DonutMeter({ value, label, detail, icon }: { value: number; label: string; detail: string; icon?: React.ReactNode }) {
@@ -334,14 +425,6 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
     data.indexerTargetHeight != null && data.indexerProcessedHeight != null
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
       : null;
-  const revenueHistoryValues = networkHistory.map((point) => toPoktNumber(point.revenueUpokt));
-  const revenueHistoryAverage = movingAverage(revenueHistoryValues, 7);
-  const revenueHistoryPoints = networkHistory.map((point, index) => ({
-    label: point.day,
-    value: revenueHistoryValues[index] ?? 0,
-    secondaryValue: revenueHistoryAverage[index] ?? 0
-  }));
-
   return (
     <main className="page">
       <section className="hero hero-stack">
@@ -488,27 +571,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
         </article>
       </section>
 
-      <TimeseriesPanel
-        title="Revenue Trend"
-        subtitle="Daily rewards with a 7-day moving average."
-        eyebrow="Market"
-        points={revenueHistoryPoints}
-        valueLabel="revenue"
-        formatValue={(value) => `${formatDecimal(value, 1)} POKT`}
-        emptyText="Daily history is currently unavailable."
-        theme="revenue"
-      />
-
-      <TimeseriesPanel
-        title="Relay Trend"
-        subtitle="Daily finalized relay volume."
-        eyebrow="Demand"
-        points={networkHistory.map((point) => ({ label: point.day, value: point.relays }))}
-        valueLabel="relays"
-        formatValue={(value) => formatCompactNumber(value)}
-        emptyText="Relay history is currently unavailable."
-        theme="demand"
-      />
+      <NetworkTrendPanel history={networkHistory} />
 
       <section className="panel section section-opportunity themed section-theme-demand">
         <div className="section-title-row">
