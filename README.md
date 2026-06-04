@@ -46,6 +46,7 @@ Live indexing and historical repair run in the same process. A fresh or partiall
 ### Legacy fallback: `Poktscan`
 
 The older `npm run worker` ingestion path can still populate snapshots through `Poktscan` and RPC fallback, but it is no longer the preferred production data path.
+Its default GraphQL endpoint is `https://data.pocket.network/`; override it with `POKTSCAN_API_URL` only when testing an alternate compatible endpoint.
 
 ### Legacy RPC fallback semantics
 
@@ -88,6 +89,7 @@ Optional overrides:
 - `POCKET_RPC_URLS` comma-separated custom RPC pool
 - `POCKET_REST_URL`
 - `POKTSCAN_API_URL`
+- `POCKET_LEGACY_RPC_FALLBACK_ENABLED=true` opt-in guard for the old worker's heavy RPC fallback
 - `POCKET_SQLITE_PATH`
 
 ## Local Development
@@ -125,6 +127,12 @@ Temporary legacy fallback:
 
 ```bash
 pm2 start npm --name pocket-worker -- run worker
+```
+
+The legacy worker does not enable its RPC fallback by default. If `Poktscan` fails, it serves stale snapshots when available instead of scanning the 30d RPC fallback path. Enable the old fallback only for manual debugging:
+
+```bash
+POCKET_LEGACY_RPC_FALLBACK_ENABLED=true npm run worker
 ```
 
 Optional worker interval override:

@@ -228,7 +228,8 @@ const DEFAULT_RPC_URLS = [
 
 const DEFAULT_RPC_URL = process.env.POCKET_RPC_URL ?? DEFAULT_RPC_URLS[0];
 const DEFAULT_REST_URL = process.env.POCKET_REST_URL ?? "https://sauron-api.infra.pocket.network";
-const DEFAULT_POKTSCAN_URL = process.env.POKTSCAN_API_URL ?? "https://api.poktscan.com/";
+const DEFAULT_POKTSCAN_URL = process.env.POKTSCAN_API_URL ?? "https://data.pocket.network/";
+const LEGACY_RPC_FALLBACK_ENABLED = process.env.POCKET_LEGACY_RPC_FALLBACK_ENABLED === "true";
 const RPC_URLS = Array.from(
   new Set(
     (process.env.POCKET_RPC_URLS ?? "")
@@ -475,6 +476,12 @@ async function fetchJson<T>(url: string, timeoutMs?: number): Promise<T> {
 async function fetchPoktscan<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const operationName = getGraphqlOperationName(query);
   let lastError: unknown;
+
+  logDataInfo("Starting Poktscan GraphQL request", {
+    operationName,
+    url: DEFAULT_POKTSCAN_URL,
+    variables
+  });
 
   for (let attempt = 1; attempt <= POKTSCAN_MAX_ATTEMPTS; attempt += 1) {
     const startedAt = Date.now();
@@ -2169,6 +2176,22 @@ async function refreshDashboard(window: TimeWindow): Promise<DashboardData> {
       });
       return persistDashboard(window, dashboard);
     } catch (poktscanError) {
+      if (!LEGACY_RPC_FALLBACK_ENABLED) {
+        logDataError("Poktscan dashboard refresh failed; legacy RPC fallback is disabled", poktscanError, { window });
+        if (stale) {
+          logDataWarning("Serving stale dashboard snapshot after Poktscan refresh failure", {
+            window,
+            dataSource: stale.dataSource,
+            latestHeight: stale.latestHeight,
+            indexerProcessedHeight: stale.indexerProcessedHeight ?? null,
+            indexerTargetHeight: stale.indexerTargetHeight ?? null
+          });
+          return stale;
+        }
+
+        throw new Error("Unable to refresh dashboard: Poktscan failed and legacy RPC fallback is disabled");
+      }
+
       logDataError("Poktscan dashboard refresh failed; trying RPC fallback", poktscanError, { window });
       try {
         const dashboard = await loadDashboardFromRpc(window);
