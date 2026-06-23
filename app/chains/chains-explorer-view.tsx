@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
-import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatUsd, formatUpokt } from "@/lib/format";
+import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatPercent, formatUsd, formatUpokt } from "@/lib/format";
 import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS } from "@/lib/opportunities";
 import type { SerializedDashboardData, SerializedServiceStats } from "@/lib/types";
 
@@ -87,13 +87,118 @@ function compareSortValue(a: string | number | bigint, b: string | number | bigi
   return (Number(a) - Number(b)) * multiplier;
 }
 
+function compareRevenueDesc(a: SerializedServiceStats, b: SerializedServiceStats): number {
+  const aRevenue = BigInt(a.revenueUpokt);
+  const bRevenue = BigInt(b.revenueUpokt);
+  if (aRevenue === bRevenue) return a.serviceName.localeCompare(b.serviceName);
+  return bRevenue > aRevenue ? 1 : -1;
+}
+
 function getSortDirectionLabel(direction: SortDirection): string {
   return direction === "asc" ? "ascending" : "descending";
 }
 
+function getShare(part: string | number, total: string | number): number {
+  if (typeof part === "string" || typeof total === "string") {
+    const totalBig = typeof total === "string" ? BigInt(total) : BigInt(total);
+    const partBig = typeof part === "string" ? BigInt(part) : BigInt(part);
+    if (totalBig === 0n) return 0;
+    return Number((partBig * 10_000n) / totalBig) / 100;
+  }
+
+  if (total === 0) return 0;
+  return (part / total) * 100;
+}
+
+function getRevenuePerMillionRelays(service: SerializedServiceStats): number {
+  return service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1_000_000;
+}
+
+function getSupplierDensityLabel(service: SerializedServiceStats): string {
+  const suppliers = service.supplierCount ?? 0;
+  if (suppliers <= 25) return "low density";
+  if (suppliers <= 75) return "balanced";
+  return "dense";
+}
+
+function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServiceStats[]; totalRevenue: string }) {
+  const topServices = [...services]
+    .sort(compareRevenueDesc)
+    .filter((service) => BigInt(service.revenueUpokt) > 0n || service.relays > 0)
+    .slice(0, 10);
+  const maxRevenue = Math.max(...topServices.map((service) => toPoktNumber(service.revenueUpokt)), 1);
+  const maxRelays = Math.max(...topServices.map((service) => service.relays), 1);
+
+  return (
+    <div className="demand-signal-grid">
+      {topServices.length === 0 && (
+        <div className="demand-signal-card">
+          <div className="demand-signal-head">
+            <div>
+              <strong>No service demand yet</strong>
+              <div className="muted">Service-level demand will appear after settlement facts are indexed.</div>
+            </div>
+          </div>
+        </div>
+      )}
+      {topServices.map((service) => {
+        const width = Math.max(8, Math.round((toPoktNumber(service.revenueUpokt) / maxRevenue) * 100));
+        const share = getShare(service.revenueUpokt, totalRevenue);
+        const density = (service.supplierCount ?? 0) <= 25 ? "low" : (service.supplierCount ?? 0) <= 75 ? "medium" : "high";
+        const revenuePerMillionRelays = getRevenuePerMillionRelays(service);
+        const relayWidth = Math.max(8, Math.round((service.relays / maxRelays) * 100));
+
+        return (
+          <div key={service.serviceId} className="demand-signal-card">
+            <div className="demand-signal-head">
+              <div>
+                <strong>{service.serviceName}</strong>
+                <div className="muted mono">{service.serviceId}</div>
+              </div>
+              <span className={`density density-${density}`}>{getSupplierDensityLabel(service)}</span>
+            </div>
+
+            <div className="demand-signal-metrics">
+              <div>
+                <span>Rewards</span>
+                <strong>{formatUpokt(BigInt(service.revenueUpokt), 1)}</strong>
+              </div>
+              <div>
+                <span>Relays</span>
+                <strong>{formatCompactNumber(service.relays)}</strong>
+              </div>
+              <div>
+                <span>Yield / 1M</span>
+                <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong>
+              </div>
+            </div>
+
+            <div className="demand-signal-bars" aria-hidden="true">
+              <div>
+                <span>reward pool</span>
+                <div className="opportunity-track"><div className="opportunity-fill" style={{ width: `${width}%` }} /></div>
+              </div>
+              <div>
+                <span>relay demand</span>
+                <div className="opportunity-track"><div className="opportunity-fill demand-fill-green" style={{ width: `${relayWidth}%` }} /></div>
+              </div>
+            </div>
+
+            <div className="demand-signal-foot">
+              <span>{formatInteger(service.supplierCount ?? 0)} suppliers live</span>
+              <span>{formatInteger(service.providerCount)} active domains</span>
+              <span>{formatPercent(share, 1)} market share</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortKey>("opportunity");
+  const [sort, setSort] = useState<SortKey>("revenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
   function updateSort(nextSort: SortKey, nextDirection?: SortDirection) {
@@ -122,7 +227,9 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
       })
       .sort((a, b) => compareSortValue(getSortValue(a, sort), getSortValue(b, sort), sortDirection) || a.serviceName.localeCompare(b.serviceName));
   }, [data?.services, query, sort, sortDirection]);
-  const totalComputeUnits = data?.services.reduce((sum, service) => sum + (service.computeUnits ?? 0), 0) ?? 0;
+  const topRevenueServices = [...(data?.services ?? [])]
+    .sort(compareRevenueDesc)
+    .slice(0, 4);
 
   if (!data) {
     return (
@@ -150,10 +257,10 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         }} />
 
         <div>
-          <span className="eyebrow">Service Explorer</span>
+          <span className="eyebrow">Service Demand</span>
           <h1>Chain Intelligence.</h1>
           <p className="section-subtitle" style={{ fontSize: '1.1rem', maxWidth: '600px' }}>
-            Explore service-level relay demand, settled rewards, active domains, and supplier density without exposing provider identities.
+            Top revenue chains first, then a searchable long tail of service demand without exposing provider identities.
           </p>
         </div>
         
@@ -170,6 +277,84 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
             <span className="hero-highlight-label">Total Traffic</span>
             <strong style={{ color: 'var(--green)' }}>{formatCompactNumber(data.totalRelays)}</strong>
           </article>
+        </div>
+      </section>
+
+      <section className="panel section">
+        <div className="section-title-row">
+          <div>
+            <h2 className="section-title">Top 4 Revenue Chains</h2>
+            <p className="section-subtitle">Highest-earning services in the current 30d snapshot.</p>
+          </div>
+          <span className="pill">Revenue</span>
+        </div>
+
+        <div className="explorer-summary-grid">
+          {topRevenueServices.map((service, index) => {
+            const opportunity = buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS);
+
+            return (
+              <article key={service.serviceId} className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+                <span className="hero-highlight-label">#{index + 1}</span>
+                <strong style={{ fontSize: '1rem' }}>{service.serviceName}</strong>
+                <div className="muted mono" style={{ fontSize: '0.75rem', marginTop: '4px' }}>{service.serviceId}</div>
+                <div style={{ marginTop: '12px' }}>
+                  <div><strong style={{ color: 'var(--accent)' }}>{formatUpokt(BigInt(service.revenueUpokt), 1)}</strong></div>
+                  <div className="muted" style={{ fontSize: '0.8rem' }}>{formatInteger(service.relays)} relays · {formatInteger(service.providerCount)} domains</div>
+                  <div className="muted" style={{ fontSize: '0.8rem' }}>{formatDecimal(opportunity.opportunityScore, 1)} opportunity score</div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="panel section themed section-theme-demand">
+        <div className="section-title-row">
+          <div>
+            <h2 className="section-title">Service Demand Map</h2>
+            <p className="section-subtitle">Top service-level reward and relay signals for the current snapshot.</p>
+          </div>
+          <span className="pill">Demand</span>
+        </div>
+
+        <ServiceDemandMap services={data.services} totalRevenue={data.totalRevenueUpokt} />
+      </section>
+
+      <section className="panel section themed section-theme-revenue">
+        <div className="section-title-row">
+          <div>
+            <h2 className="section-title">Top Services</h2>
+            <p className="section-subtitle">Compact leaderboard for the highest earning services.</p>
+          </div>
+          <span className="pill">Leaderboards</span>
+        </div>
+
+        <div className="service-list">
+          {[...data.services]
+            .sort(compareRevenueDesc)
+            .slice(0, 8)
+            .map((service) => {
+              const revenuePerProviderValue = toPoktNumber(service.revenueUpokt) / Math.max(service.providerCount, 1);
+              return (
+                <div key={service.serviceId} className="service-row service-row-rich">
+                  <div className="service-row-top">
+                    <div>
+                      <strong style={{ fontSize: '1.05rem' }}>{service.serviceName}</strong>
+                      <div className="muted mono" style={{ fontSize: '0.75rem', marginTop: '4px' }}>{service.serviceId}</div>
+                    </div>
+                    <div className="right">
+                      <strong className="accent-number" style={{ fontSize: '1.1rem' }}>{formatUpokt(BigInt(service.revenueUpokt), 1)}</strong>
+                      <div className="muted" style={{ fontSize: '0.85rem' }}>{formatInteger(service.relays)} relays</div>
+                    </div>
+                  </div>
+                  <div className="provider-row-metrics">
+                    <span>{formatInteger(service.providerCount)} domains</span>
+                    <span style={{ color: 'var(--green)' }}>{formatDecimal(revenuePerProviderValue, 1)} POKT / domain</span>
+                  </div>
+                </div>
+              );
+            })}
         </div>
       </section>
 

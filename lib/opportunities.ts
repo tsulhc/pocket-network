@@ -1,4 +1,12 @@
-import type { SerializedServiceStats } from "@/lib/types";
+type OpportunityService = {
+  serviceId: string;
+  serviceName: string;
+  supplierCount?: number;
+  providerCount: number;
+  relays: number;
+  computeUnits?: number;
+  revenueUpokt: string | bigint;
+};
 
 export const SESSION_SUPPLIER_SLOTS = 50;
 export const DEFAULT_NEW_PROVIDER_SUPPLIERS = 15;
@@ -17,8 +25,8 @@ export type ProviderServiceOpportunity = {
   projectedRevenuePerSupplierUpokt: bigint;
 };
 
-function toBigInt(value: string): bigint {
-  return BigInt(value);
+function toBigInt(value: string | bigint): bigint {
+  return typeof value === "bigint" ? value : BigInt(value);
 }
 
 function toPoktNumber(value: bigint): number {
@@ -52,7 +60,7 @@ export function getSelectionProbability(existingSupplierCount: number, enteringS
   return Math.max(0, Math.min(100, (1 - probabilityNoneSelected) * 100));
 }
 
-export function buildProviderServiceOpportunity(service: SerializedServiceStats, providerSupplierCount: number): ProviderServiceOpportunity {
+export function buildProviderServiceOpportunity(service: OpportunityService, providerSupplierCount: number): ProviderServiceOpportunity {
   const supplierCount = Math.max(service.supplierCount ?? 0, 0);
   const projectedRevenueUpokt = getProjectedRevenueUpokt(toBigInt(service.revenueUpokt), supplierCount, providerSupplierCount);
   const projectedRevenuePerSupplierUpokt = providerSupplierCount > 0
@@ -80,7 +88,7 @@ export function buildProviderServiceOpportunity(service: SerializedServiceStats,
 }
 
 export function allocateSuppliersByMarginalReturn(
-  services: SerializedServiceStats[],
+  services: OpportunityService[],
   supplierCount: number
 ): Map<string, number> {
   const allocation = new Map<string, number>();
@@ -93,7 +101,7 @@ export function allocateSuppliersByMarginalReturn(
   }
 
   for (let index = 0; index < supplierCount; index += 1) {
-    let bestService: SerializedServiceStats | null = null;
+    let bestService: OpportunityService | null = null;
     let bestGain = -1n;
 
     for (const service of services) {
@@ -116,7 +124,7 @@ export function allocateSuppliersByMarginalReturn(
 }
 
 export function buildAllocatedServiceOpportunity(
-  service: SerializedServiceStats,
+  service: OpportunityService,
   enteringSupplierCount: number,
   allocatedSupplierCount: number
 ): ProviderServiceOpportunity {

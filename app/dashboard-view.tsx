@@ -14,7 +14,6 @@ import {
 import type {
   SerializedDashboardData,
   SerializedNetworkDailyHistoryPoint,
-  SerializedServiceStats,
   TimeWindow
 } from "@/lib/types";
 
@@ -37,10 +36,6 @@ function toPoktNumber(value: string): number {
   return Number(toBigInt(value)) / 1_000_000;
 }
 
-function toUsdFromUpokt(value: string, poktPriceUsd: number): number {
-  return toPoktNumber(value) * poktPriceUsd;
-}
-
 function getShare(part: string | number, total: string | number): number {
   if (typeof part === "string" || typeof total === "string") {
     const totalBig = typeof total === "string" ? BigInt(total) : BigInt(total);
@@ -60,33 +55,11 @@ function median(numbers: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
-function getRevenuePerMillionRelays(service: SerializedServiceStats): number {
-  return service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1_000_000;
-}
-
-function getSupplierDensityLabel(service: SerializedServiceStats): string {
-  const suppliers = service.supplierCount ?? 0;
-  if (suppliers <= 25) return "low density";
-  if (suppliers <= 75) return "balanced";
-  return "dense";
-}
-
-function buildDomainBuckets(providers: SerializedDashboardData["providers"]): Array<{ label: string; count: number; revenue: bigint }> {
-  const buckets = [
-    { label: "0-10 POKT", min: 0, max: 10, count: 0, revenue: 0n },
-    { label: "10-100 POKT", min: 10, max: 100, count: 0, revenue: 0n },
-    { label: "100-1k POKT", min: 100, max: 1_000, count: 0, revenue: 0n },
-    { label: "1k+ POKT", min: 1_000, max: Number.POSITIVE_INFINITY, count: 0, revenue: 0n }
-  ];
-
-  for (const provider of providers) {
-    const pokt = toPoktNumber(provider.revenueUpokt);
-    const bucket = buckets.find((entry) => pokt >= entry.min && pokt < entry.max) ?? buckets[buckets.length - 1];
-    bucket.count += 1;
-    bucket.revenue += BigInt(provider.revenueUpokt);
-  }
-
-  return buckets.map(({ label, count, revenue }) => ({ label, count, revenue }));
+function compareRevenueDesc<T extends { revenueUpokt: string }>(a: T, b: T): number {
+  const aRevenue = BigInt(a.revenueUpokt);
+  const bRevenue = BigInt(b.revenueUpokt);
+  if (aRevenue === bRevenue) return 0;
+  return bRevenue > aRevenue ? 1 : -1;
 }
 
 function buildNetworkTrendPath(points: Array<{ revenue: number }>, maxRevenue: number): string {
@@ -192,133 +165,6 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
         <p className="footer-note">Network history is currently unavailable.</p>
       )}
     </section>
-  );
-}
-
-function DonutMeter({ value, label, detail, icon }: { value: number; label: string; detail: string; icon?: React.ReactNode }) {
-  const degrees = Math.max(0, Math.min(360, Math.round((value / 100) * 360)));
-
-  return (
-    <div className="donut-card">
-      <div
-        className="donut-ring"
-        style={{
-          background: `conic-gradient(from 220deg, var(--accent) 0deg, var(--accent-strong) ${degrees}deg, rgba(255,255,255,0.05) ${degrees}deg 360deg)`
-        }}
-      >
-        <div className="donut-inner">
-          {icon && <div style={{ color: 'var(--accent)', marginBottom: '4px' }}>{icon}</div>}
-          <strong>{formatPercent(value, 1)}</strong>
-          <span>{label}</span>
-        </div>
-      </div>
-      <p className="muted" style={{ fontSize: '0.85rem', marginTop: '12px' }}>{detail}</p>
-    </div>
-  );
-}
-
-function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServiceStats[]; totalRevenue: string }) {
-  const topServices = services
-    .filter((service) => BigInt(service.revenueUpokt) > 0n || service.relays > 0)
-    .slice(0, 10);
-  const maxRevenue = Math.max(...topServices.map((service) => toPoktNumber(service.revenueUpokt)), 1);
-  const maxRelays = Math.max(...topServices.map((service) => service.relays), 1);
-
-  return (
-    <div className="demand-signal-grid">
-      {topServices.length === 0 && (
-        <div className="demand-signal-card">
-          <div className="demand-signal-head">
-            <div>
-              <strong>No service demand yet</strong>
-              <div className="muted">Service-level demand will appear after settlement facts are indexed.</div>
-            </div>
-          </div>
-        </div>
-      )}
-      {topServices.map((service) => {
-        const width = Math.max(8, Math.round((toPoktNumber(service.revenueUpokt) / maxRevenue) * 100));
-        const share = getShare(service.revenueUpokt, totalRevenue);
-        const density = (service.supplierCount ?? 0) <= 25 ? "low" : (service.supplierCount ?? 0) <= 75 ? "medium" : "high";
-        const revenuePerMillionRelays = getRevenuePerMillionRelays(service);
-        const relayWidth = Math.max(8, Math.round((service.relays / maxRelays) * 100));
-
-        return (
-          <div key={service.serviceId} className="demand-signal-card">
-            <div className="demand-signal-head">
-              <div>
-                <strong>{service.serviceName}</strong>
-                <div className="muted mono">{service.serviceId}</div>
-              </div>
-              <span className={`density density-${density}`}>
-                {getSupplierDensityLabel(service)}
-              </span>
-            </div>
-
-            <div className="demand-signal-metrics">
-              <div>
-                <span>Rewards</span>
-                <strong>{formatUpokt(BigInt(service.revenueUpokt), 1)}</strong>
-              </div>
-              <div>
-                <span>Relays</span>
-                <strong>{formatCompactNumber(service.relays)}</strong>
-              </div>
-              <div>
-                <span>Yield / 1M</span>
-                <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong>
-              </div>
-            </div>
-
-            <div className="demand-signal-bars" aria-hidden="true">
-              <div>
-                <span>reward pool</span>
-                <div className="opportunity-track"><div className="opportunity-fill" style={{ width: `${width}%` }} /></div>
-              </div>
-              <div>
-                <span>relay demand</span>
-                <div className="opportunity-track"><div className="opportunity-fill demand-fill-green" style={{ width: `${relayWidth}%` }} /></div>
-              </div>
-            </div>
-
-            <div className="demand-signal-foot">
-              <span>{formatInteger(service.supplierCount ?? 0)} suppliers live</span>
-              <span>{formatInteger(service.providerCount)} active domains</span>
-              <span>{formatPercent(share, 1)} market share</span>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function DomainDistribution({ data }: { data: SerializedDashboardData }) {
-  const buckets = buildDomainBuckets(data.providers);
-  const maxCount = Math.max(...buckets.map((bucket) => bucket.count), 1);
-
-  return (
-    <div className="distribution-grid">
-      {buckets.map((bucket) => {
-        const width = Math.max(8, Math.round((bucket.count / maxCount) * 100));
-        const share = getShare(bucket.revenue.toString(), data.totalRevenueUpokt);
-        return (
-          <div key={bucket.label} className="distribution-row">
-            <div className="distribution-row-head">
-              <strong>{bucket.label}</strong>
-              <span className="muted">{formatInteger(bucket.count)} domains</span>
-            </div>
-            <div className="opportunity-track">
-              <div className="opportunity-fill" style={{ width: `${width}%` }} />
-            </div>
-            <div className="opportunity-foot">
-              <span>{formatUpokt(bucket.revenue, 1)}</span>
-              <span>{formatPercent(share, 1)} of rewards</span>
-            </div>
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -430,21 +276,15 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
     );
   }
 
-  const topService = data.services[0];
-  const averageRevenuePerProvider = data.activeProviders === 0 ? 0 : toPoktNumber(data.totalRevenueUpokt) / data.activeProviders;
+  const providersByRevenue = [...data.providers].sort(compareRevenueDesc);
+  const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
+  const topService = servicesByRevenue[0];
   const medianRevenuePerProvider = median(data.providers.map((provider) => toPoktNumber(provider.revenueUpokt)));
   const revenuePerMillionRelays = data.totalRelays === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000;
   const top5ProviderShare = getShare(
-    data.providers.slice(0, 5).reduce((sum, provider) => sum + BigInt(provider.revenueUpokt), 0n).toString(),
+    providersByRevenue.slice(0, 5).reduce((sum, provider) => sum + BigInt(provider.revenueUpokt), 0n).toString(),
     data.totalRevenueUpokt
   );
-  const top5ServiceShare = getShare(
-    data.services.slice(0, 5).reduce((sum, service) => sum + BigInt(service.revenueUpokt), 0n).toString(),
-    data.totalRevenueUpokt
-  );
-  const totalRevenueUsd = toUsdFromUpokt(data.totalRevenueUpokt, data.poktPriceUsd);
-  const averageRevenuePerProviderUsd = averageRevenuePerProvider * data.poktPriceUsd;
-  const revenuePerMillionRelaysUsd = revenuePerMillionRelays * data.poktPriceUsd;
   const indexerLag =
     data.indexerTargetHeight != null && data.indexerProcessedHeight != null
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
@@ -526,189 +366,32 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
               </div>
             </aside>
           </div>
+
+          <div className="hero-support-grid" style={{ gridTemplateColumns: "1fr", marginTop: "32px" }}>
+            <article className="panel narrative-card dashboard-insight-card">
+              <span className="eyebrow eyebrow-ghost">Highlights</span>
+              <h2>Market efficiency.</h2>
+              <ul className="narrative-points">
+                <li>
+                  <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M relays in this window.
+                </li>
+                <li>
+                  <strong>{formatUsd(revenuePerMillionRelays * data.poktPriceUsd, 2)}</strong> estimated value per 1M relays.
+                </li>
+                <li>
+                  <strong>{formatDecimal(medianRevenuePerProvider, 1)} POKT</strong> median benchmark for active domains.
+                </li>
+                <li>
+                  <strong>{topService ? topService.serviceName : "n/a"}</strong> currently leads the public reward pool.
+                </li>
+              </ul>
+            </article>
+          </div>
         </div>
 
-        <div className="hero-support-grid">
-          <article className="panel narrative-card dashboard-insight-card">
-            <span className="eyebrow eyebrow-ghost">Highlights</span>
-            <h2>Market efficiency.</h2>
-            <ul className="narrative-points">
-              <li>
-                <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M relays in this window.
-              </li>
-              <li>
-                <strong>{formatUsd(revenuePerMillionRelaysUsd, 2)}</strong> estimated value per 1M relays.
-              </li>
-              <li>
-                <strong>{formatDecimal(medianRevenuePerProvider, 1)} POKT</strong> median benchmark for active domains.
-              </li>
-              <li>
-                <strong>{topService ? topService.serviceName : "n/a"}</strong> currently leads the public reward pool.
-              </li>
-            </ul>
-          </article>
-
-          <article className="panel section section-visual themed section-theme-demand">
-            <div className="section-title-row">
-              <div>
-                <h2 className="section-title">Market Shape</h2>
-                <p className="section-subtitle">Concentration and service distribution signals.</p>
-              </div>
-              <span className="pill">Overview</span>
-            </div>
-
-            <div className="donut-grid">
-              <DonutMeter 
-                value={top5ProviderShare} 
-                label="Top 5 Aggregate" 
-                detail="Combined reward share of the five largest anonymous domain cohorts." 
-                icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>}
-              />
-              <DonutMeter 
-                value={100 - top5ProviderShare} 
-                label="Long-Tail Share" 
-                detail="Reward share held outside the five largest anonymous domain cohorts." 
-                icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
-              />
-              <DonutMeter 
-                value={top5ServiceShare} 
-                label="Core Mix" 
-                detail="Revenue driven by the top 5 high-demand chains." 
-                icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>}
-              />
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section className="kpi-grid kpi-grid-strong">
-        <article className="panel kpi kpi-primary">
-          <span className="kpi-label">Total Revenue</span>
-          <span className="kpi-value">{formatUpokt(toBigInt(data.totalRevenueUpokt))}</span>
-          <span className="kpi-foot">{formatUsd(totalRevenueUsd, 0)} est. value</span>
-        </article>
-        <article className="panel kpi">
-          <span className="kpi-label">Relays</span>
-          <span className="kpi-value">{formatCompactNumber(data.totalRelays)}</span>
-          <span className="kpi-foot">Total finalized volume</span>
-        </article>
-        <article className="panel kpi">
-          <span className="kpi-label">Avg. Earnings</span>
-          <span className="kpi-value" style={{ color: 'var(--green)' }}>{formatDecimal(averageRevenuePerProvider, 1)} POKT</span>
-          <span className="kpi-foot">Per domain benchmark</span>
-        </article>
-        <article className="panel kpi">
-          <span className="kpi-label">Unit Revenue</span>
-          <span className="kpi-value" style={{ color: 'var(--accent)' }}>{formatDecimal(revenuePerMillionRelays, 2)} POKT</span>
-          <span className="kpi-foot">Per 1M relays</span>
-        </article>
       </section>
 
       <NetworkTrendPanel history={networkHistory} />
-
-      <section className="panel section section-opportunity themed section-theme-demand">
-        <div className="section-title-row">
-          <div>
-              <h2 className="section-title">Service Demand</h2>
-              <p className="section-subtitle">
-                Reward and participation signals by service. identities and private mixes are not exposed.
-              </p>
-            </div>
-            <span className="pill">Public Data</span>
-        </div>
-
-        <ServiceDemandMap services={data.services} totalRevenue={data.totalRevenueUpokt} />
-      </section>
-
-      <section className="section-grid">
-        <article className="panel section themed section-theme-privacy">
-          <div className="section-title-row">
-            <div>
-              <h2 className="section-title">Domain Distribution</h2>
-              <p className="section-subtitle">Aggregated reward buckets for active domains.</p>
-            </div>
-            <span className="pill">Privacy</span>
-          </div>
-          <DomainDistribution data={data} />
-        </article>
-
-        <article className="panel section themed section-theme-revenue">
-          <div className="section-title-row">
-            <div>
-              <h2 className="section-title">Top Services</h2>
-              <p className="section-subtitle">Chains with the highest reward pools.</p>
-            </div>
-            <span className="pill">Rewards</span>
-          </div>
-
-          <div className="service-list">
-            {data.services.slice(0, 8).map((service) => {
-              const revenuePerProvider = toPoktNumber(service.revenueUpokt) / Math.max(service.providerCount, 1);
-              return (
-                <div key={service.serviceId} className="service-row service-row-rich">
-                  <div className="service-row-top">
-                    <div>
-                      <strong style={{ fontSize: '1.05rem' }}>{service.serviceName}</strong>
-                      <div className="muted mono">{service.serviceId}</div>
-                    </div>
-                    <div className="right">
-                      <strong className="accent-number" style={{ fontSize: '1.1rem' }}>{formatUpokt(toBigInt(service.revenueUpokt), 1)}</strong>
-                       <div className="muted" style={{ fontSize: '0.85rem' }}>{formatInteger(service.relays)} relays</div>
-                     </div>
-                   </div>
-                   <div className="provider-row-metrics">
-                     <span>{formatInteger(service.providerCount)} domains</span>
-                     <span style={{ color: 'var(--green)' }}>{formatDecimal(revenuePerProvider, 1)} POKT / domain</span>
-                   </div>
-                 </div>
-              );
-            })}
-          </div>
-        </article>
-      </section>
-
-      <section className="panel section hero-meta themed section-theme-integrity">
-        <div className="section-title-row compact-gap">
-          <div>
-            <h2 className="section-title">System Status</h2>
-            <p className="muted" style={{ fontSize: '0.8rem' }}>Data integrity and sync diagnostics</p>
-          </div>
-          <span className="pill">Health</span>
-        </div>
-        
-        <div className="insight-list">
-          <div className="insight-row">
-            <span className="muted">Data Source</span>
-            <strong style={{ color: data.dataSource === "poktscan" ? 'var(--green)' : 'var(--orange)' }}>
-              {data.dataSource === "poktscan" ? "Legacy Verified" : "Live RPC Sync"}
-            </strong>
-          </div>
-          <div className="insight-row">
-            <span className="muted">Chain Height</span>
-            <strong className="mono">{formatInteger(data.latestHeight)}</strong>
-          </div>
-          {indexerLag != null && (
-            <div className="insight-row">
-              <span className="muted">Indexer Lag</span>
-              <strong style={{ color: indexerLag > 10 ? 'var(--red)' : 'var(--green)' }}>{formatInteger(indexerLag)} blocks</strong>
-            </div>
-          )}
-          <div className="insight-row">
-            <span className="muted">Market Price</span>
-            <strong className="accent-number" style={{ color: 'var(--accent)' }}>{formatUsd(data.poktPriceUsd, 4)} POKT/USD</strong>
-          </div>
-          <div className="insight-row">
-            <span className="muted">Last Updated</span>
-            <strong>{new Date(data.generatedAt).toLocaleTimeString("en-US", { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</strong>
-          </div>
-          {isPending && (
-            <div className="insight-row">
-              <span className="muted">Status</span>
-              <strong style={{ color: 'var(--accent)' }}>Updating...</strong>
-            </div>
-          )}
-        </div>
-      </section>
     </main>
   );
 }

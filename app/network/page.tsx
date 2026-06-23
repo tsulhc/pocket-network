@@ -18,6 +18,25 @@ function getNumberState(key: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function getStringState(key: string): string | null {
+  return getIndexerState(key);
+}
+
+function getPriceState(): { value: number | null; updatedAt: string | null } {
+  const raw = getIndexerState("pokt_price_usd");
+  if (!raw) return { value: null, updatedAt: null };
+
+  try {
+    const parsed = JSON.parse(raw) as { value?: number; updatedAt?: string };
+    return {
+      value: typeof parsed.value === "number" && Number.isFinite(parsed.value) ? parsed.value : null,
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : null
+    };
+  } catch {
+    return { value: null, updatedAt: null };
+  }
+}
+
 function formatIso(value: string | null): string {
   if (!value) return "n/a";
   const date = new Date(value);
@@ -28,6 +47,9 @@ function formatIso(value: string | null): string {
 export default function NetworkStatusPage() {
   const latestSeenHeight = getNumberState("latest_seen_height");
   const lastProcessedHeight = getNumberState("last_processed_height");
+  const wsConnected = getStringState("ws_connected") === "true";
+  const activeRpc = getStringState("active_rpc");
+  const priceState = getPriceState();
   const averageBlockSeconds = Number(process.env.POCKET_INDEXER_AVG_BLOCK_SECONDS ?? 60);
   const retentionDays = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
   const estimatedRetentionBlocks = Math.max(1, Math.round((retentionDays * 24 * 60 * 60) / Math.max(averageBlockSeconds, 1)));
@@ -136,6 +158,25 @@ export default function NetworkStatusPage() {
             <div className="insight-row"><span className="muted">Last coverage scan</span><strong>{formatIso(newestScan)}</strong></div>
           </div>
         </article>
+      </section>
+
+      <section className="panel section">
+        <div className="section-title-row">
+          <div>
+            <h2 className="section-title">System Status</h2>
+            <p className="section-subtitle">Live runtime state for the public indexer and snapshot pipeline.</p>
+          </div>
+          <span className="pill">Health</span>
+        </div>
+
+        <div className="insight-list">
+          <div className="insight-row"><span className="muted">Data source</span><strong>{wsConnected ? "CometBFT WebSocket" : "HTTP/RPC fallback"}</strong></div>
+          <div className="insight-row"><span className="muted">Active RPC</span><strong className="mono">{activeRpc ?? "n/a"}</strong></div>
+          <div className="insight-row"><span className="muted">POKT price</span><strong>{priceState.value == null ? "n/a" : `$${priceState.value.toFixed(4)}`}</strong></div>
+          <div className="insight-row"><span className="muted">Price updated</span><strong>{formatIso(priceState.updatedAt)}</strong></div>
+          <div className="insight-row"><span className="muted">Indexer height</span><strong>{lastProcessedHeight == null ? "n/a" : formatInteger(lastProcessedHeight)}</strong></div>
+          <div className="insight-row"><span className="muted">Chain height</span><strong>{latestSeenHeight == null ? "n/a" : formatInteger(latestSeenHeight)}</strong></div>
+        </div>
       </section>
     </main>
   );
