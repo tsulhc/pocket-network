@@ -35,6 +35,7 @@ const SORT_COLUMNS: SortColumn[] = [
 
 type ChainsExplorerViewProps = {
   data: SerializedDashboardData | null;
+  mode?: "chains" | "service-demand";
 };
 
 function toPoktNumber(value: string): number {
@@ -196,7 +197,7 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
   );
 }
 
-export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
+export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExplorerViewProps) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("revenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -235,8 +236,8 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
     return (
       <main className="page">
         <section className="panel section explorer-empty">
-          <span className="eyebrow">Chains</span>
-          <h1 className="section-title">Chain explorer is warming up.</h1>
+          <span className="eyebrow">{mode === "chains" ? "Chains" : "Service Demand"}</span>
+          <h1 className="section-title">{mode === "chains" ? "Chain explorer is warming up." : "Service demand is warming up."}</h1>
           <p className="section-subtitle">The 30d dashboard snapshot is still being prepared. Refresh shortly to inspect services.</p>
         </section>
       </main>
@@ -257,10 +258,12 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         }} />
 
         <div>
-          <span className="eyebrow">Service Demand</span>
-          <h1>Chain Intelligence.</h1>
+          <span className="eyebrow">{mode === "chains" ? "Chains" : "Service Demand"}</span>
+          <h1>{mode === "chains" ? "Chain Explorer." : "Chain Intelligence."}</h1>
           <p className="section-subtitle" style={{ fontSize: '1.1rem', maxWidth: '600px' }}>
-            Top revenue chains first, then a searchable long tail of service demand without exposing provider identities.
+            {mode === "chains"
+              ? "Search, sort, and open service-level chain details from a dedicated explorer."
+              : "Top revenue chains first, then service demand signals without exposing provider identities."}
           </p>
         </div>
         
@@ -280,6 +283,7 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         </div>
       </section>
 
+      {mode === "service-demand" && (
       <section className="panel section">
         <div className="section-title-row">
           <div>
@@ -308,7 +312,9 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
           })}
         </div>
       </section>
+      )}
 
+      {mode === "service-demand" && (
       <section className="panel section themed section-theme-demand">
         <div className="section-title-row">
           <div>
@@ -320,7 +326,9 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
 
         <ServiceDemandMap services={data.services} totalRevenue={data.totalRevenueUpokt} />
       </section>
+      )}
 
+      {mode === "service-demand" && (
       <section className="panel section themed section-theme-revenue">
         <div className="section-title-row">
           <div>
@@ -357,8 +365,18 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
             })}
         </div>
       </section>
+      )}
 
+      {mode === "chains" && (
       <section className="panel section">
+        <div className="section-title-row">
+          <div>
+            <h2 className="section-title">Chains</h2>
+            <p className="section-subtitle">Clickable and filterable list of services in the current 30d snapshot.</p>
+          </div>
+          <span className="pill">Explorer</span>
+        </div>
+
         <div className="explorer-toolbar">
           <div className="explorer-search">
             <span className="hero-highlight-label">Filter Chains</span>
@@ -461,6 +479,7 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
           </table>
         </div>
       </section>
+      )}
     </main>
   );
 }
