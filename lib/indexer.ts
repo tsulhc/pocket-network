@@ -183,7 +183,7 @@ const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ??
 const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 4);
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
-const WINDOWS: TimeWindow[] = ["24h", "7d", "30d", "365d"];
+const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
 const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
 const SUPPLIER_REWARD_REASONS = new Set([
@@ -594,7 +594,7 @@ async function syncApplications(): Promise<void> {
         const serviceId = app.service_configs?.[0]?.service_id;
         if (!serviceId) continue;
         const unstakeEnd = parseMaybeNumber(app.unstake_session_end_height);
-        if (unstakeEnd != null && unstakeEnd > 0 && sourceHeight > 0 && unstakeEnd <= sourceHeight) continue;
+        if (unstakeEnd != null && unstakeEnd > 0 && sourceHeight > unstakeEnd) continue;
         appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
       }
       nextKey = response.pagination?.next_key ?? "";
@@ -812,8 +812,6 @@ export async function rebuildIndexerCaches(): Promise<void> {
 }
 
 async function maybeRebuildCaches(force = false): Promise<void> {
-  if (!force && (!cacheDirty || Date.now() - lastCacheBuildAt < CACHE_INTERVAL_MS)) return;
-
   if (Date.now() - lastSessionSyncAt > SESSION_SYNC_INTERVAL_MS) {
     try {
       await syncSessionData();
@@ -822,6 +820,8 @@ async function maybeRebuildCaches(force = false): Promise<void> {
       logWarn("Periodic session sync failed", { error: error instanceof Error ? error.message : String(error) });
     }
   }
+
+  if (!force && (!cacheDirty || Date.now() - lastCacheBuildAt < CACHE_INTERVAL_MS)) return;
 
   await rebuildIndexerCaches();
 }

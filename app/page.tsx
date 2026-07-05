@@ -15,7 +15,7 @@ type PageProps = {
 };
 
 function isWindow(value: string | undefined): value is TimeWindow {
-  return value === "24h" || value === "7d" || value === "30d" || value === "365d";
+  return value === "24h" || value === "7d" || value === "30d";
 }
 
 export default async function Home({ searchParams }: PageProps) {
