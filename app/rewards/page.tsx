@@ -106,7 +106,6 @@ export default async function RewardsPage() {
     label: point.day,
     value: rewardHistoryValues[index] ?? 0,
     secondaryValue: rewardHistoryAverage[index] ?? 0,
-    isEstimated: point.isEstimated,
   }));
   const topOpportunityServices = [...data.services]
     .map((service) => ({

@@ -11,6 +11,7 @@ import {
   getIndexedServiceDailyAggregates,
   getIndexedHeightCoverage,
   getIndexerState,
+  getGlobalRelayCoverage,
   getLatestIndexedFact,
   markIndexedHeightFailed,
   pruneIndexerData,
@@ -754,14 +755,14 @@ async function refreshPrice(): Promise<number> {
   return getCachedPrice();
 }
 
-function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
+function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>, migrationComplete: boolean): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
   return rows.map((row) => ({
     day: row.day,
     relays: row.relays,
-    estimatedRelays: row.estimated_relays ?? undefined,
-    estimatedComputeUnits: row.estimated_compute_units ?? undefined,
-    isEstimated: (row.estimated_relays ?? 0) > 0 && (row.estimated_relays ?? 0) !== row.relays ? true : undefined,
-    relayCoverage: row.relay_coverage ?? undefined,
+    estimatedRelays: migrationComplete ? (row.estimated_relays ?? undefined) : undefined,
+    estimatedComputeUnits: migrationComplete ? (row.estimated_compute_units ?? undefined) : undefined,
+    isEstimated: migrationComplete && (row.estimated_relays ?? 0) > 0 && (row.estimated_relays ?? 0) !== row.relays ? true : undefined,
+    relayCoverage: migrationComplete ? (row.relay_coverage ?? undefined) : undefined,
     revenueUpokt: row.revenue_upokt
   }));
 }
@@ -808,9 +809,7 @@ export async function rebuildIndexerCaches(): Promise<void> {
       const totalEstimatedComputeUnits = migrationComplete
         ? serviceRows.reduce((sum, row) => sum + (row.estimated_compute_units ?? 0), 0)
         : 0;
-      const relayCoverage = migrationComplete
-        ? (totalEstimatedRelays <= 0 ? 0 : totalRelays >= totalEstimatedRelays ? 1 : totalRelays / totalEstimatedRelays)
-        : 0;
+      const relayCoverage = migrationComplete ? getGlobalRelayCoverage(since) : 0;
       const totalRevenueUpokt = serviceRows.reduce((sum, row) => sum + BigInt(row.revenue_upokt), 0n);
       const earliestSettlementTime = serviceRows.length > 0 ? new Date(since).toISOString() : null;
       const latestSettlementTime = latestFact ? new Date(latestFact.block_time).toISOString() : null;
@@ -873,15 +872,17 @@ export async function rebuildIndexerCaches(): Promise<void> {
 
     const dailySince = getStartOfTodayUtc() - 30 * 24 * 60 * 60 * 1000;
     const dailyRows = getIndexedDailyAggregates(dailySince);
-    setProviderDataCache("network_daily_history:30", serializeDailyCache(dailyRows));
+    setProviderDataCache("network_daily_history:30", serializeDailyCache(dailyRows, migrationComplete));
     for (const service of getIndexedServiceAggregates(dailySince).slice(0, 100)) {
       const rows = getIndexedServiceDailyAggregates(dailySince, service.service_id);
-      setProviderDataCache(`service_daily_history:${service.service_id}:30`, serializeDailyCache(rows));
+      setProviderDataCache(`service_daily_history:${service.service_id}:30`, serializeDailyCache(rows, migrationComplete));
     }
 
-    const generatedAt = new Date().toISOString();
-    for (const row of dailyRows) {
-      upsertDailyRollup({ ...row, generated_at: generatedAt });
+    if (migrationComplete) {
+      const generatedAt = new Date().toISOString();
+      for (const row of dailyRows) {
+        upsertDailyRollup({ ...row, generated_at: generatedAt });
+      }
     }
 
     setProviderDataCache("indexer_status", {

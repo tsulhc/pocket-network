@@ -419,6 +419,14 @@ const selectDailyAggregatesStatement = db.prepare(
   `
 );
 
+const selectGlobalRelayCoverageStatement = db.prepare(
+  `
+    SELECT CAST(COALESCE(SUM(CASE WHEN estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS coverage
+    FROM settlement_facts
+    WHERE block_time >= ?
+  `
+);
+
 const selectServiceDailyAggregatesStatement = db.prepare(
   `
     SELECT
@@ -650,6 +658,11 @@ export function getIndexedProviderAggregates(sinceUnixMs: number): IndexedProvid
 
 export function getIndexedDailyAggregates(sinceUnixMs: number): IndexedDailyAggregate[] {
   return selectDailyAggregatesStatement.all(sinceUnixMs) as IndexedDailyAggregate[];
+}
+
+export function getGlobalRelayCoverage(sinceUnixMs: number): number {
+  const row = selectGlobalRelayCoverageStatement.get(sinceUnixMs) as { coverage: number } | undefined;
+  return row?.coverage ?? 0;
 }
 
 export function getIndexedServiceDailyAggregates(sinceUnixMs: number, serviceId: string): IndexedDailyAggregate[] {
