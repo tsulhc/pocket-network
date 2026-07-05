@@ -22,11 +22,13 @@ import {
   setIndexerState,
   setMeta,
   startJobRun,
+  upsertDailyRollup,
   type IndexedSettlementFact,
   type IndexedService,
   type IndexedSupplierDomain
 } from "@/lib/db";
 import type { TimeWindow } from "@/lib/types";
+import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 
 type RpcEvent = {
   type: string;
@@ -98,6 +100,9 @@ type SerializedDashboardCache = {
   earliestSettlementTime: string | null;
   latestSettlementTime: string | null;
   totalRelays: number;
+  totalEstimatedRelays: number;
+  totalEstimatedComputeUnits: number;
+  relayCoverage: number;
   totalRevenueUpokt: string;
   activeProviders: number;
   activeChains: number;
@@ -116,6 +121,7 @@ type SerializedDashboardCache = {
     serviceId: string;
     serviceName: string;
     relays: number;
+    estimatedRelays?: number;
     computeUnits?: number;
     computeUnitsPerRelay?: number;
     supplierCount?: number;
@@ -177,7 +183,7 @@ const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ??
 const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 4);
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
-const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
+const WINDOWS: TimeWindow[] = ["24h", "7d", "30d", "365d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
 const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
 const SUPPLIER_REWARD_REASONS = new Set([
@@ -318,6 +324,13 @@ function parseInteger(value: string | undefined): number {
   return Number(normalizeAttributeValue(value));
 }
 
+function parseMaybeInteger(value: string | undefined): number | undefined {
+  const normalized = normalizeAttributeValue(value);
+  if (!normalized) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function parseUpokt(value: string): bigint {
   const normalized = normalizeAttributeValue(value);
   const match = normalized.match(/^(-?\d+)upokt$/);
@@ -407,6 +420,9 @@ function parseSettlementFact(event: RpcEvent, height: number, eventIndex: number
     supplierHash: hashIdentity(supplierOperatorAddress),
     ownerHash: supplierOwnerAddress ? hashIdentity(supplierOwnerAddress) : null,
     relays: parseInteger(attributes.num_relays),
+    estimatedRelays: parseMaybeInteger(attributes.num_estimated_relays),
+    claimedComputeUnits: parseMaybeInteger(attributes.num_claimed_compute_units),
+    estimatedComputeUnits: parseMaybeInteger(attributes.num_estimated_compute_units),
     revenueUpokt: supplierRevenueUpokt.toString()
   };
 }
@@ -507,6 +523,107 @@ async function syncSupplierDomains(): Promise<void> {
   }
 }
 
+let sessionSyncedAppsStaked: Record<string, number> | null = null;
+let sessionSyncedSlots: number | null = null;
+let sessionSyncedHeight: number | null = null;
+
+function getSessionAppsStaked(): Record<string, number> | null {
+  return sessionSyncedAppsStaked;
+}
+
+function getSessionSlots(): number | null {
+  return sessionSyncedSlots;
+}
+
+export function getLiveSessionSuppliersPerSession(): number {
+  return sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
+}
+
+export function getLiveAppsStakedByService(): Record<string, number> {
+  return sessionSyncedAppsStaked ?? {};
+}
+
+type RestApplicationsResponse = {
+  applications?: Array<{ service_configs?: Array<{ service_id?: string }> }>;
+  pagination?: { next_key?: string; total?: string };
+};
+
+type RestSessionParamsResponse = {
+  params?: { num_suppliers_per_session?: string | number };
+};
+
+async function syncSessionParameters(): Promise<void> {
+  try {
+    const response = await fetchJson<RestSessionParamsResponse>(
+      `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/session/params`
+    );
+    const slots = parseMaybeNumber(response.params?.num_suppliers_per_session);
+    if (slots != null && slots > 0) {
+      sessionSyncedSlots = slots;
+      setIndexerState("session_suppliers_per_session", JSON.stringify({
+        value: slots, sourceHeight: sessionSyncedHeight ?? 0, fetchedAt: new Date().toISOString()
+      }));
+      logInfo("Session parameters synced", { suppliersPerSession: slots });
+    }
+  } catch (error) {
+    logWarn("Session params sync failed; reusing last-known value", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+async function syncApplications(): Promise<void> {
+  const appCounts: Record<string, number> = {};
+  let nextKey = "";
+
+  try {
+    while (true) {
+      const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
+      if (nextKey) search.set("pagination.key", nextKey);
+      const response = await fetchJson<RestApplicationsResponse>(
+        `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/application/application?${search.toString()}`
+      );
+      for (const app of response.applications ?? []) {
+        const serviceId = app.service_configs?.[0]?.service_id;
+        if (serviceId) {
+          appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
+        }
+      }
+      nextKey = response.pagination?.next_key ?? "";
+      if (!nextKey) break;
+    }
+
+    sessionSyncedAppsStaked = appCounts;
+    setIndexerState("session_apps_staked", JSON.stringify({
+      value: appCounts, fetchedAt: new Date().toISOString()
+    }));
+    logInfo("Applications synced", { totalApps: Object.values(appCounts).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appCounts).length });
+  } catch (error) {
+    logWarn("Applications sync failed; reusing last-known values", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+async function syncSessionData(): Promise<void> {
+  await syncSessionParameters();
+  await syncApplications();
+}
+
+function warmupSessionState(): void {
+  try {
+    const slotsRaw = getIndexerState("session_suppliers_per_session");
+    if (slotsRaw) {
+      const parsed = JSON.parse(slotsRaw) as { value: number };
+      if (Number.isFinite(parsed.value) && parsed.value > 0) sessionSyncedSlots = parsed.value;
+    }
+  } catch { /* keep null */ }
+
+  try {
+    const appsRaw = getIndexerState("session_apps_staked");
+    if (appsRaw) {
+      const parsed = JSON.parse(appsRaw) as { value: Record<string, number> };
+      if (parsed.value && typeof parsed.value === "object") sessionSyncedAppsStaked = parsed.value;
+    }
+  } catch { /* keep null */ }
+}
+
 function windowMs(window: TimeWindow): number {
   switch (window) {
     case "24h":
@@ -515,7 +632,14 @@ function windowMs(window: TimeWindow): number {
       return 7 * 24 * 60 * 60 * 1000;
     case "30d":
       return 30 * 24 * 60 * 60 * 1000;
+    case "365d":
+      return 365 * 24 * 60 * 60 * 1000;
   }
+}
+
+function getStartOfTodayUtc(): number {
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
 function getCachedPrice(): number {
@@ -579,10 +703,13 @@ export async function rebuildIndexerCaches(): Promise<void> {
     const poktPriceUsd = await refreshPrice();
 
     for (const window of WINDOWS) {
-      const since = Date.now() - windowMs(window);
+      const since = window === "30d" ? getStartOfTodayUtc() - windowMs(window) : Date.now() - windowMs(window);
       const serviceRows = getIndexedServiceAggregates(since);
       const providerRows = getIndexedProviderAggregates(since);
       const totalRelays = serviceRows.reduce((sum, row) => sum + row.relays, 0);
+      const totalEstimatedRelays = serviceRows.reduce((sum, row) => sum + (row.estimated_relays ?? row.relays), 0);
+      const totalEstimatedComputeUnits = serviceRows.reduce((sum, row) => sum + (row.estimated_compute_units ?? 0), 0);
+      const relayCoverage = serviceRows.length === 0 ? 0 : serviceRows.reduce((sum, row) => sum + (row.relay_coverage ?? 0), 0) / serviceRows.length;
       const totalRevenueUpokt = serviceRows.reduce((sum, row) => sum + BigInt(row.revenue_upokt), 0n);
       const earliestSettlementTime = serviceRows.length > 0 ? new Date(since).toISOString() : null;
       const latestSettlementTime = latestFact ? new Date(latestFact.block_time).toISOString() : null;
@@ -590,7 +717,8 @@ export async function rebuildIndexerCaches(): Promise<void> {
         serviceId: row.service_id,
         serviceName: row.service_name ?? row.service_id,
         relays: row.relays,
-        computeUnits: row.compute_units_per_relay ? row.compute_units_per_relay * row.relays : undefined,
+        estimatedRelays: row.estimated_relays ?? row.relays,
+        computeUnits: row.estimated_compute_units ?? undefined,
         computeUnitsPerRelay: row.compute_units_per_relay ?? undefined,
         supplierCount: row.supplier_count,
         revenueUpokt: row.revenue_upokt,
@@ -621,6 +749,9 @@ export async function rebuildIndexerCaches(): Promise<void> {
         earliestSettlementTime,
         latestSettlementTime,
         totalRelays,
+        totalEstimatedRelays,
+        totalEstimatedComputeUnits,
+        relayCoverage,
         totalRevenueUpokt: totalRevenueUpokt.toString(),
         activeProviders: providerRows.length,
         activeChains: services.length,
@@ -633,11 +764,17 @@ export async function rebuildIndexerCaches(): Promise<void> {
       }
     }
 
-    const dailyRows = getIndexedDailyAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const dailySince = getStartOfTodayUtc() - 30 * 24 * 60 * 60 * 1000;
+    const dailyRows = getIndexedDailyAggregates(dailySince);
     setProviderDataCache("network_daily_history:30", serializeDailyCache(dailyRows));
-    for (const service of getIndexedServiceAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000).slice(0, 100)) {
-      const rows = getIndexedServiceDailyAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000, service.service_id);
+    for (const service of getIndexedServiceAggregates(dailySince).slice(0, 100)) {
+      const rows = getIndexedServiceDailyAggregates(dailySince, service.service_id);
       setProviderDataCache(`service_daily_history:${service.service_id}:30`, serializeDailyCache(rows));
+    }
+
+    const generatedAt = new Date().toISOString();
+    for (const row of dailyRows) {
+      upsertDailyRollup({ ...row, generated_at: generatedAt });
     }
 
     setProviderDataCache("indexer_status", {
@@ -981,6 +1118,12 @@ async function runLiveStartupTasks(): Promise<void> {
   }
 
   try {
+    await syncSessionData();
+  } catch (error) {
+    logError("Session data sync failed during live startup", error);
+  }
+
+  try {
     await runLiveCatchup(500);
     pruneIndexerData(RETENTION_DAYS);
   } catch (error) {
@@ -1084,6 +1227,8 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
   const jobId = startJobRun("indexer_start", options as Record<string, unknown>);
   const liveFirst = Boolean(options.live && !options.once && !options.backfillDays && !options.fromHeight && !options.toHeight);
 
+  warmupSessionState();
+
   try {
     logInfo("Starting Pocket indexer", options as Record<string, unknown>);
     if (liveFirst) {
@@ -1095,6 +1240,7 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
 
     await syncServices();
     await syncSupplierDomains();
+    await syncSessionData();
     await runCatchup(options);
     pruneIndexerData(RETENTION_DAYS);
     finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt });

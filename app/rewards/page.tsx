@@ -97,7 +97,8 @@ export default async function RewardsPage() {
   const averageReward = data.activeProviders === 0 ? 0 : toPoktNumber(data.totalRevenueUpokt) / data.activeProviders;
   const top5ProviderRewards = providersByRevenue.slice(0, 5).reduce((sum, provider) => sum + provider.revenueUpokt, 0n);
   const top5ServiceRewards = servicesByRevenue.slice(0, 5).reduce((sum, service) => sum + service.revenueUpokt, 0n);
-  const rewardPerMillionRelays = data.totalRelays === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000;
+  const relayDenominator = data.totalEstimatedRelays > 0 ? data.totalEstimatedRelays : data.totalRelays;
+  const rewardPerMillionRelays = relayDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / relayDenominator) * 1_000_000;
   const rewardHistoryValues = history.map((point) => toPoktNumber(point.revenueUpokt));
   const rewardHistoryAverage = movingAverage(rewardHistoryValues, 7);
   const rewardHistoryPoints = history.map((point, index) => ({
@@ -296,7 +297,7 @@ export default async function RewardsPage() {
               <div className="muted mono" style={{ fontSize: '0.75rem', marginTop: '4px' }}>{service.serviceId}</div>
               <div style={{ marginTop: '12px' }}>
                 <div><strong style={{ color: 'var(--accent)' }}>{formatDecimal(opportunity.opportunityScore, 1)}</strong> score</div>
-                <div className="muted" style={{ fontSize: '0.8rem' }}>{formatUpokt(opportunity.projectedRevenueUpokt, 1)} projected over 15 suppliers</div>
+                <div className="muted" style={{ fontSize: '0.8rem' }}>{formatUpokt(opportunity.equalShareRevenueEstimateUpokt, 1)} projected over 15 suppliers</div>
                 <div className="muted" style={{ fontSize: '0.8rem' }}>{formatPercent(opportunity.selectionProbability, 1)} selection probability</div>
               </div>
               <div style={{ marginTop: '12px' }}>

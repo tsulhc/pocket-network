@@ -1,4 +1,4 @@
-export type TimeWindow = "24h" | "7d" | "30d";
+export type TimeWindow = "24h" | "7d" | "30d" | "365d";
 
 export type ProviderChainStats = {
   serviceId: string;
@@ -40,8 +40,10 @@ export type ServiceStats = {
   serviceId: string;
   serviceName: string;
   relays: number;
+  estimatedRelays?: number;
   computeUnits?: number;
   computeUnitsPerRelay?: number;
+  estimatedComputeUnits?: number;
   supplierCount?: number;
   revenueUpokt: bigint;
   providerCount: number;
@@ -61,6 +63,9 @@ export type DashboardData = {
   earliestSettlementTime: string | null;
   latestSettlementTime: string | null;
   totalRelays: number;
+  totalEstimatedRelays: number;
+  totalEstimatedComputeUnits: number;
+  relayCoverage: number;
   totalRevenueUpokt: bigint;
   activeProviders: number;
   activeChains: number;
@@ -97,8 +102,9 @@ export type SerializedProviderStats = Omit<ProviderStats, "revenueUpokt" | "chai
   chains: SerializedProviderChainStats[];
 };
 
-export type SerializedServiceStats = Omit<ServiceStats, "revenueUpokt"> & {
+export type SerializedServiceStats = Omit<ServiceStats, "revenueUpokt" | "estimatedComputeUnits"> & {
   revenueUpokt: string;
+  estimatedComputeUnits?: number;
 };
 
 export type SerializedProviderDailyHistoryPoint = Omit<ProviderDailyHistoryPoint, "revenueUpokt"> & {

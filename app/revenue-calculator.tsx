@@ -57,7 +57,7 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
   const serviceOpportunities = selectedServices.map((service) =>
     buildAllocatedServiceOpportunity(service, supplierCount, supplierAllocation.get(service.serviceId) ?? 0)
   );
-  const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.projectedRevenueUpokt, 0n);
+  const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.equalShareRevenueEstimateUpokt, 0n);
   const selectedChainCount = selectedServices.length;
   const coveredChainCount = selectedServices.filter((service) => (supplierAllocation.get(service.serviceId) ?? 0) > 0).length;
   const foundationCoveredSuppliers = Math.min(supplierCount, FREE_SUPPLIER_BUDGET);

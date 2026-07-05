@@ -6,7 +6,6 @@ import {
   formatCompactNumber,
   formatDecimal,
   formatInteger,
-  formatPercent,
   formatRelativeRange,
   formatUsd,
   formatUpokt
@@ -17,7 +16,7 @@ import type {
   TimeWindow
 } from "@/lib/types";
 
-const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
+const WINDOWS: TimeWindow[] = ["24h", "7d", "30d", "365d"];
 const WARMING_RETRY_MS = 5_000;
 
 type DashboardViewProps = {
@@ -34,25 +33,6 @@ function toBigInt(value: string): bigint {
 
 function toPoktNumber(value: string): number {
   return Number(toBigInt(value)) / 1_000_000;
-}
-
-function getShare(part: string | number, total: string | number): number {
-  if (typeof part === "string" || typeof total === "string") {
-    const totalBig = typeof total === "string" ? BigInt(total) : BigInt(total);
-    const partBig = typeof part === "string" ? BigInt(part) : BigInt(part);
-    if (totalBig === 0n) return 0;
-    return Number((partBig * 10_000n) / totalBig) / 100;
-  }
-
-  if (total === 0) return 0;
-  return (part / total) * 100;
-}
-
-function median(numbers: number[]): number {
-  if (numbers.length === 0) return 0;
-  const sorted = [...numbers].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
 function compareRevenueDesc<T extends { revenueUpokt: string }>(a: T, b: T): number {
@@ -276,15 +256,10 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
     );
   }
 
-  const providersByRevenue = [...data.providers].sort(compareRevenueDesc);
   const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
   const topService = servicesByRevenue[0];
-  const medianRevenuePerProvider = median(data.providers.map((provider) => toPoktNumber(provider.revenueUpokt)));
-  const revenuePerMillionRelays = data.totalRelays === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000;
-  const top5ProviderShare = getShare(
-    providersByRevenue.slice(0, 5).reduce((sum, provider) => sum + BigInt(provider.revenueUpokt), 0n).toString(),
-    data.totalRevenueUpokt
-  );
+  const relayDenominator = data.totalEstimatedRelays > 0 ? data.totalEstimatedRelays : data.totalRelays;
+  const revenuePerMillionRelays = relayDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / relayDenominator) * 1_000_000;
   const indexerLag =
     data.indexerTargetHeight != null && data.indexerProcessedHeight != null
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
@@ -298,7 +273,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
           <div className="hero-main dashboard-hero-main">
             <div className="hero-copy hero-copy-strong dashboard-hero-copy">
               <span className="eyebrow">Network Analytics</span>
-              <h1>Public signal for Pocket demand.</h1>
+              <h1>Earn POKT Serving Relays.</h1>
               <p>
                 Track finalized relays, rewards, and service concentration through a privacy-safe lens built from indexed settlement events.
               </p>
@@ -313,7 +288,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
                       className={`window-tab${active ? " active" : ""}`}
                       onClick={() => loadWindow(entry, true)}
                     >
-                      {entry === "24h" ? "Real-time" : entry === "7d" ? "Weekly" : "Monthly"}
+                      {entry === "24h" ? "24 hours" : entry === "7d" ? "Weekly" : entry === "30d" ? "Monthly" : "Yearly"}
                     </button>
                   );
                 })}
@@ -344,20 +319,20 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
               </div>
               <div className="network-pulse-grid">
                 <div>
-                  <span>Active Domains</span>
+                  <span>Active Provider Groups</span>
                   <strong>{formatInteger(data.activeProviders)}</strong>
                 </div>
                 <div>
-                  <span>Active Services</span>
+                  <span>Active Chains</span>
                   <strong>{formatInteger(data.activeChains)}</strong>
                 </div>
                 <div>
-                  <span>Median Earnings</span>
-                  <strong>{formatDecimal(medianRevenuePerProvider, 1)} POKT</strong>
+                  <span>Rewards</span>
+                  <strong>{formatUpokt(toBigInt(data.totalRevenueUpokt), 1)}</strong>
                 </div>
                 <div>
-                  <span>Top 5 Share</span>
-                  <strong>{formatPercent(top5ProviderShare, 1)}</strong>
+                  <span>Relay Volume</span>
+                  <strong>{formatCompactNumber(data.totalRelays)}</strong>
                 </div>
               </div>
               <div className="network-pulse-footer">
@@ -370,19 +345,16 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
           <div className="hero-support-grid" style={{ gridTemplateColumns: "1fr", marginTop: "32px" }}>
             <article className="panel narrative-card dashboard-insight-card">
               <span className="eyebrow eyebrow-ghost">Highlights</span>
-              <h2>Market efficiency.</h2>
+              <h2>Pocket Network Highlights.</h2>
               <ul className="narrative-points">
                 <li>
-                  <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M relays in this window.
+                  <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M estimated relays in this period.
                 </li>
                 <li>
-                  <strong>{formatUsd(revenuePerMillionRelays * data.poktPriceUsd, 2)}</strong> estimated value per 1M relays.
+                  <strong>{formatUsd(revenuePerMillionRelays * data.poktPriceUsd, 2)}</strong> estimated value per 1M estimated relays.
                 </li>
                 <li>
-                  <strong>{formatDecimal(medianRevenuePerProvider, 1)} POKT</strong> median benchmark for active domains.
-                </li>
-                <li>
-                  <strong>{topService ? topService.serviceName : "n/a"}</strong> currently leads the public reward pool.
+                  <strong>{topService ? topService.serviceName : "n/a"}</strong> is the top reward chain in this period.
                 </li>
               </ul>
             </article>

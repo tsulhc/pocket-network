@@ -264,7 +264,8 @@ const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "c
 const SAMPLE_BLOCKS_PER_WINDOW: Record<TimeWindow, number> = {
   "24h": 36,
   "7d": 72,
-  "30d": 144
+  "30d": 144,
+  "365d": 144
 };
 const PROVIDER_HISTORY_DAYS = 30;
 const BLOCK_SEARCH_TIMEOUT_MS = 2_500;
@@ -922,6 +923,8 @@ function getWindowStart(window: TimeWindow): Date {
       return new Date(now - 7 * 24 * 60 * 60 * 1000);
     case "30d":
       return new Date(now - 30 * 24 * 60 * 60 * 1000);
+    case "365d":
+      return new Date(now - 365 * 24 * 60 * 60 * 1000);
   }
 }
 
@@ -1744,6 +1747,9 @@ function buildDashboardFromProviderRows(
     earliestSettlementTime: options?.earliestSettlementTime ?? null,
     latestSettlementTime: options?.latestSettlementTime ?? null,
     totalRelays,
+    totalEstimatedRelays: totalRelays,
+    totalEstimatedComputeUnits: 0,
+    relayCoverage: 0,
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
@@ -1902,6 +1908,9 @@ function buildDashboard(
     earliestSettlementTime: settlementTimes[0] ?? null,
     latestSettlementTime: settlementTimes.at(-1) ?? null,
     totalRelays,
+    totalEstimatedRelays: totalRelays,
+    totalEstimatedComputeUnits: 0,
+    relayCoverage: 0,
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
@@ -2619,7 +2628,7 @@ export async function runDataIngestion(): Promise<void> {
   try {
     logDataInfo("Starting data ingestion worker run");
 
-    const windows: TimeWindow[] = ["30d", "7d", "24h"];
+    const windows: TimeWindow[] = ["30d", "7d", "24h", "365d"];
     const dashboards: Partial<Record<TimeWindow, DashboardData>> = {};
     for (const window of windows) {
       dashboards[window] = await refreshDashboard(window);

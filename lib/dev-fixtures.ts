@@ -20,11 +20,13 @@ const PROVIDER_REWARD_POKT = [18_400, 13_700, 10_250, 8_100, 6_900, 4_850, 3_600
 function windowMultiplier(window: TimeWindow): number {
   switch (window) {
     case "24h":
-      return 1 / 30;
+      return 0.07;
     case "7d":
-      return 7 / 30;
+      return 0.25;
     case "30d":
       return 1;
+    case "365d":
+      return 12;
   }
 }
 
@@ -92,6 +94,9 @@ export function getDevelopmentDashboardData(window: TimeWindow): DashboardData {
     earliestSettlementTime: new Date(now.getTime() - multiplier * 30 * 24 * 60 * 60 * 1000).toISOString(),
     latestSettlementTime: now.toISOString(),
     totalRelays,
+    totalEstimatedRelays: totalRelays,
+    totalEstimatedComputeUnits: 0,
+    relayCoverage: 0,
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,

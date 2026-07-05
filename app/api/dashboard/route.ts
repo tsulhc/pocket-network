@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 function isWindow(value: string | null): value is TimeWindow {
-  return value === "24h" || value === "7d" || value === "30d";
+  return value === "24h" || value === "7d" || value === "30d" || value === "365d";
 }
 
 export async function GET(request: NextRequest) {

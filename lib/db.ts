@@ -19,6 +19,9 @@ export type IndexedSettlementFact = {
   supplierHash: string;
   ownerHash: string | null;
   relays: number;
+  estimatedRelays?: number;
+  claimedComputeUnits?: number;
+  estimatedComputeUnits?: number;
   revenueUpokt: string;
 };
 
@@ -50,6 +53,9 @@ export type IndexedServiceAggregate = {
   service_name: string | null;
   compute_units_per_relay: number | null;
   relays: number;
+  estimated_relays: number;
+  estimated_compute_units: number;
+  relay_coverage: number;
   revenue_upokt: string;
   supplier_count: number;
   provider_count: number;
@@ -65,6 +71,9 @@ export type IndexedProviderAggregate = {
 export type IndexedDailyAggregate = {
   day: string;
   relays: number;
+  estimated_relays: number;
+  estimated_compute_units: number;
+  relay_coverage: number;
   revenue_upokt: string;
 };
 
@@ -139,6 +148,9 @@ db.exec(`
     supplier_hash TEXT NOT NULL,
     owner_hash TEXT,
     relays INTEGER NOT NULL,
+    estimated_relays INTEGER,
+    claimed_compute_units INTEGER,
+    estimated_compute_units INTEGER,
     revenue_upokt TEXT NOT NULL,
     PRIMARY KEY (height, event_index)
   );
@@ -152,6 +164,16 @@ db.exec(`
     last_error TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS daily_rollups (
+    day TEXT PRIMARY KEY,
+    total_relays INTEGER NOT NULL,
+    estimated_relays INTEGER,
+    estimated_compute_units INTEGER,
+    revenue_upokt TEXT NOT NULL,
+    relay_coverage REAL NOT NULL DEFAULT 0,
+    generated_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS settlement_facts_time_idx ON settlement_facts(block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_service_time_idx ON settlement_facts(service_id, block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_day_idx ON settlement_facts(day);
@@ -159,6 +181,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS supplier_domain_dim_domain_idx ON supplier_domain_dim(domain_hash);
   CREATE INDEX IF NOT EXISTS indexed_heights_status_idx ON indexed_heights(status, height);
 `);
+
+for (const col of ["estimated_relays", "claimed_compute_units", "estimated_compute_units"]) {
+  try { db.exec(`ALTER TABLE settlement_facts ADD COLUMN ${col} INTEGER`); } catch { /* column already exists */ }
+}
+
+const settlementFactsColumns = db.prepare("PRAGMA table_info(settlement_facts)").all() as Array<{ name: string }>;
+const hasLegacyColumn = (col: string) => settlementFactsColumns.some((c) => c.name === col);
+if (!hasLegacyColumn("relays")) {
+  try { db.exec("ALTER TABLE settlement_facts ADD COLUMN relays INTEGER"); } catch { /* fallback */ }
+}
 
 const selectSettlementBlocksStatement = db.prepare(
   `SELECT height, block_time, events_json FROM settlement_blocks WHERE height IN (${Array.from({ length: 999 }, () => "?").join(",")})`
@@ -266,6 +298,9 @@ const insertSettlementFactStatement = db.prepare(
       supplier_hash,
       owner_hash,
       relays,
+      estimated_relays,
+      claimed_compute_units,
+      estimated_compute_units,
       revenue_upokt
     ) VALUES (
       @height,
@@ -277,6 +312,9 @@ const insertSettlementFactStatement = db.prepare(
       @supplier_hash,
       @owner_hash,
       @relays,
+      @estimated_relays,
+      @claimed_compute_units,
+      @estimated_compute_units,
       @revenue_upokt
     )
   `
@@ -329,6 +367,9 @@ const selectServiceAggregatesStatement = db.prepare(
       service_dim.service_name,
       service_dim.compute_units_per_relay,
       SUM(facts.relays) AS relays,
+      CAST(COALESCE(SUM(facts.estimated_relays), 0) AS INTEGER) AS estimated_relays,
+      CAST(COALESCE(SUM(facts.estimated_compute_units), 0) AS INTEGER) AS estimated_compute_units,
+      CAST(COALESCE(SUM(CASE WHEN facts.estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS relay_coverage,
       CAST(SUM(CAST(facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
       COUNT(DISTINCT facts.supplier_hash) AS supplier_count,
       COUNT(DISTINCT COALESCE(supplier_domain_dim.domain_hash, facts.owner_hash, facts.supplier_hash)) AS provider_count
@@ -363,6 +404,9 @@ const selectDailyAggregatesStatement = db.prepare(
     SELECT
       day,
       SUM(relays) AS relays,
+      CAST(COALESCE(SUM(estimated_relays), 0) AS INTEGER) AS estimated_relays,
+      CAST(COALESCE(SUM(estimated_compute_units), 0) AS INTEGER) AS estimated_compute_units,
+      CAST(COALESCE(SUM(CASE WHEN estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS relay_coverage,
       CAST(SUM(CAST(revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt
     FROM settlement_facts
     WHERE block_time >= ?
@@ -376,6 +420,9 @@ const selectServiceDailyAggregatesStatement = db.prepare(
     SELECT
       day,
       SUM(relays) AS relays,
+      CAST(COALESCE(SUM(estimated_relays), 0) AS INTEGER) AS estimated_relays,
+      CAST(COALESCE(SUM(estimated_compute_units), 0) AS INTEGER) AS estimated_compute_units,
+      CAST(COALESCE(SUM(CASE WHEN estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS relay_coverage,
       CAST(SUM(CAST(revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt
     FROM settlement_facts
     WHERE block_time >= ? AND service_id = ?
@@ -386,6 +433,29 @@ const selectServiceDailyAggregatesStatement = db.prepare(
 
 const selectLatestIndexedFactStatement = db.prepare(
   "SELECT height, block_time FROM settlement_facts ORDER BY height DESC LIMIT 1"
+);
+
+const upsertDailyRollupStatement = db.prepare(
+  `
+    INSERT INTO daily_rollups (day, total_relays, estimated_relays, estimated_compute_units, revenue_upokt, relay_coverage, generated_at)
+    VALUES (@day, @total_relays, @estimated_relays, @estimated_compute_units, @revenue_upokt, @relay_coverage, @generated_at)
+    ON CONFLICT(day) DO UPDATE SET
+      total_relays = excluded.total_relays,
+      estimated_relays = excluded.estimated_relays,
+      estimated_compute_units = excluded.estimated_compute_units,
+      revenue_upokt = excluded.revenue_upokt,
+      relay_coverage = excluded.relay_coverage,
+      generated_at = excluded.generated_at
+  `
+);
+
+const selectDailyRollupsStatement = db.prepare(
+  `
+    SELECT day, total_relays AS relays, estimated_relays, estimated_compute_units, revenue_upokt, relay_coverage
+    FROM daily_rollups
+    WHERE day >= ?
+    ORDER BY day ASC
+  `
 );
 
 const writeIndexedBlockTransaction = db.transaction((height: number, facts: IndexedSettlementFact[]) => {
@@ -400,6 +470,9 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
       supplier_hash: fact.supplierHash,
       owner_hash: fact.ownerHash,
       relays: fact.relays,
+      estimated_relays: fact.estimatedRelays ?? null,
+      claimed_compute_units: fact.claimedComputeUnits ?? null,
+      estimated_compute_units: fact.estimatedComputeUnits ?? null,
       revenue_upokt: fact.revenueUpokt
     });
   }
@@ -582,6 +655,22 @@ export function getIndexedServiceDailyAggregates(sinceUnixMs: number, serviceId:
 export function getLatestIndexedFact(): { height: number; block_time: number } | null {
   const row = selectLatestIndexedFactStatement.get() as { height: number; block_time: number } | undefined;
   return row ?? null;
+}
+
+export function upsertDailyRollup(rollup: IndexedDailyAggregate & { generated_at: string }): void {
+  upsertDailyRollupStatement.run({
+    day: rollup.day,
+    total_relays: rollup.relays,
+    estimated_relays: rollup.estimated_relays,
+    estimated_compute_units: rollup.estimated_compute_units,
+    revenue_upokt: rollup.revenue_upokt,
+    relay_coverage: rollup.relay_coverage,
+    generated_at: rollup.generated_at
+  });
+}
+
+export function getDailyRollups(sinceDay: string): IndexedDailyAggregate[] {
+  return selectDailyRollupsStatement.all(sinceDay) as IndexedDailyAggregate[];
 }
 
 export function pruneIndexerData(retentionDays: number, maxJobRuns = 500): void {
