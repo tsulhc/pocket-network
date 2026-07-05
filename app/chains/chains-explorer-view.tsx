@@ -27,7 +27,7 @@ const SORT_COLUMNS: SortColumn[] = [
   { key: "revenuePerProvider", label: "Avg Domain Reward", align: "right" },
   {
     key: "opportunity",
-    label: "Demand Signal",
+    label: "Demand Signal (experimental)",
     align: "right",
     tooltip: "The higher the score, the more potential for providers to profit from participating in this network."
   }
@@ -401,7 +401,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
             <span className="hero-highlight-label">Sort Objective</span>
             <select value={sort} onChange={(event) => updateSort(event.target.value as SortKey, SORT_COLUMNS.find((entry) => entry.key === event.target.value)?.defaultDirection ?? "desc")}>
               <option value="service">Service Identity</option>
-              <option value="opportunity">Demand Signal</option>
+              <option value="opportunity">Demand Signal (experimental)</option>
               <option value="revenue">Total Revenue</option>
               <option value="relays">Relay Volume</option>
               <option value="providers">Domain Density</option>

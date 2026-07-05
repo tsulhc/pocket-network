@@ -82,6 +82,8 @@ export type ProviderDailyHistoryPoint = {
 export type NetworkDailyHistoryPoint = {
   day: string;
   relays: number;
+  estimatedRelays?: number;
+  estimatedComputeUnits?: number;
   revenueUpokt: bigint;
 };
 

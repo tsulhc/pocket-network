@@ -6,6 +6,7 @@ import {
   formatCompactNumber,
   formatDecimal,
   formatInteger,
+  formatPercent,
   formatRelativeRange,
   formatUsd,
   formatUpokt
@@ -16,7 +17,7 @@ import type {
   TimeWindow
 } from "@/lib/types";
 
-const WINDOWS: TimeWindow[] = ["24h", "7d", "30d", "365d"];
+const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const WARMING_RETRY_MS = 5_000;
 
 type DashboardViewProps = {
@@ -55,7 +56,11 @@ function buildNetworkTrendPath(points: Array<{ revenue: number }>, maxRevenue: n
 }
 
 function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistoryPoint[] }) {
-  const trendPoints = history.slice(-30).map((point) => ({
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const trendPoints = history
+    .filter((point) => point.day < todayUtc)
+    .slice(-30)
+    .map((point) => ({
     day: point.day,
     revenue: toPoktNumber(point.revenueUpokt),
     relays: point.relays
@@ -258,7 +263,9 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
 
   const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
   const topService = servicesByRevenue[0];
-  const relayDenominator = data.totalEstimatedRelays > 0 ? data.totalEstimatedRelays : data.totalRelays;
+  const estimatedCoverageComplete = data.relayCoverage >= 1;
+  const relayDenominator = estimatedCoverageComplete && data.totalEstimatedRelays > 0 ? data.totalEstimatedRelays : data.totalRelays;
+  const relayLabel = estimatedCoverageComplete ? "estimated relays" : "relays";
   const revenuePerMillionRelays = relayDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / relayDenominator) * 1_000_000;
   const indexerLag =
     data.indexerTargetHeight != null && data.indexerProcessedHeight != null
@@ -348,14 +355,19 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
               <h2>Pocket Network Highlights.</h2>
               <ul className="narrative-points">
                 <li>
-                  <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M estimated relays in this period.
+                  <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M {relayLabel} in this period.
                 </li>
                 <li>
-                  <strong>{formatUsd(revenuePerMillionRelays * data.poktPriceUsd, 2)}</strong> estimated value per 1M estimated relays.
+                  <strong>{formatUsd(revenuePerMillionRelays * data.poktPriceUsd, 2)}</strong> estimated value per 1M {relayLabel}.
                 </li>
                 <li>
                   <strong>{topService ? topService.serviceName : "n/a"}</strong> is the top reward chain in this period.
                 </li>
+                {!estimatedCoverageComplete && (
+                <li className="muted">
+                  <em>Denominator uses sampled relays; estimated-relay coverage is partial ({formatPercent(data.relayCoverage * 100, 0)}).</em>
+                </li>
+                )}
               </ul>
             </article>
           </div>

@@ -288,7 +288,7 @@ const upsertSupplierDomainStatement = db.prepare(
 
 const insertSettlementFactStatement = db.prepare(
   `
-    INSERT OR IGNORE INTO settlement_facts (
+    INSERT INTO settlement_facts (
       height,
       event_index,
       block_time,
@@ -317,6 +317,10 @@ const insertSettlementFactStatement = db.prepare(
       @estimated_compute_units,
       @revenue_upokt
     )
+    ON CONFLICT(height, event_index) DO UPDATE SET
+      estimated_relays = COALESCE(excluded.estimated_relays, settlement_facts.estimated_relays),
+      claimed_compute_units = COALESCE(excluded.claimed_compute_units, settlement_facts.claimed_compute_units),
+      estimated_compute_units = COALESCE(excluded.estimated_compute_units, settlement_facts.estimated_compute_units)
   `
 );
 

@@ -97,7 +97,8 @@ export default async function RewardsPage() {
   const averageReward = data.activeProviders === 0 ? 0 : toPoktNumber(data.totalRevenueUpokt) / data.activeProviders;
   const top5ProviderRewards = providersByRevenue.slice(0, 5).reduce((sum, provider) => sum + provider.revenueUpokt, 0n);
   const top5ServiceRewards = servicesByRevenue.slice(0, 5).reduce((sum, service) => sum + service.revenueUpokt, 0n);
-  const relayDenominator = data.totalEstimatedRelays > 0 ? data.totalEstimatedRelays : data.totalRelays;
+  const estimatedCoverageComplete = data.relayCoverage >= 1;
+  const relayDenominator = estimatedCoverageComplete && data.totalEstimatedRelays > 0 ? data.totalEstimatedRelays : data.totalRelays;
   const rewardPerMillionRelays = relayDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / relayDenominator) * 1_000_000;
   const rewardHistoryValues = history.map((point) => toPoktNumber(point.revenueUpokt));
   const rewardHistoryAverage = movingAverage(rewardHistoryValues, 7);
@@ -282,7 +283,7 @@ export default async function RewardsPage() {
         <div className="section-title-row">
           <div>
             <h2 className="section-title">Top 4 Opportunities</h2>
-            <p className="section-subtitle">Best services for a new provider based on the current opportunity score.</p>
+            <p className="section-subtitle">Best services for a new provider based on an experimental opportunity score.</p>
           </div>
           <Link href="/chains" className="calculator-action" style={{ background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', boxShadow: 'none' }}>
             Explore all services →

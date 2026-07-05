@@ -57,7 +57,9 @@ export function getSelectionProbability(existingSupplierCount: number, enteringS
   const M = Math.max(0, Math.round(enteringSupplierCount));
   const T = E + M;
   if (T <= 0) return 0;
-  const K = Math.min(Math.max(1, Math.round(sessionSlots)), T);
+  const slots = Math.round(sessionSlots);
+  if (slots <= 0) return 0;
+  const K = Math.min(slots, T);
 
   const combination = (n: number, k: number): number => {
     if (k < 0 || k > n) return 0;
@@ -92,8 +94,9 @@ export function getExpectedAssignments(
   enteringSupplierCount: number,
   totalSuppliers: number
 ): number {
-  if (appsStaked <= 0 || enteringSupplierCount <= 0 || totalSuppliers <= 0 || sessionSlots <= 0) return 0;
-  return appsStaked * sessionSlots * enteringSupplierCount / totalSuppliers;
+  if (appsStaked <= 0 || enteringSupplierCount <= 0 || totalSuppliers <= 0) return 0;
+  const K = Math.min(Math.max(1, Math.round(sessionSlots)), Math.round(totalSuppliers));
+  return appsStaked * K * enteringSupplierCount / totalSuppliers;
 }
 
 export function getExpectedSessionsRepresented(

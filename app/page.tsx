@@ -3,7 +3,7 @@ import { serializePublicDashboardData } from "@/lib/dashboard-serialization";
 import { getDashboardDataSafe, getDashboardSnapshot, getNetworkDailyHistoryLocal, primeDashboardRefresh } from "@/lib/pocket";
 import type { SerializedDashboardData, SerializedNetworkDailyHistoryPoint, TimeWindow } from "@/lib/types";
 
-const WINDOWS: TimeWindow[] = ["24h", "7d", "30d", "365d"];
+const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;

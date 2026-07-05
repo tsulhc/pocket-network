@@ -194,6 +194,8 @@ const SUPPLIER_REWARD_REASONS = new Set([
 let lastCacheBuildAt = 0;
 let cacheDirty = true;
 let liveCatchupInFlight = false;
+let lastSessionSyncAt = 0;
+const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
@@ -544,7 +546,11 @@ export function getLiveAppsStakedByService(): Record<string, number> {
 }
 
 type RestApplicationsResponse = {
-  applications?: Array<{ service_configs?: Array<{ service_id?: string }> }>;
+  applications?: Array<{
+    service_configs?: Array<{ service_id?: string }>;
+    unstake_session_end_height?: string | number;
+    pending_transfer?: unknown;
+  }>;
   pagination?: { next_key?: string; total?: string };
 };
 
@@ -554,16 +560,18 @@ type RestSessionParamsResponse = {
 
 async function syncSessionParameters(): Promise<void> {
   try {
+    const sourceHeight = Number(getIndexerState("last_processed_height") ?? 0);
     const response = await fetchJson<RestSessionParamsResponse>(
       `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/session/params`
     );
     const slots = parseMaybeNumber(response.params?.num_suppliers_per_session);
     if (slots != null && slots > 0) {
       sessionSyncedSlots = slots;
+      sessionSyncedHeight = sourceHeight;
       setIndexerState("session_suppliers_per_session", JSON.stringify({
-        value: slots, sourceHeight: sessionSyncedHeight ?? 0, fetchedAt: new Date().toISOString()
+        value: slots, sourceHeight, fetchedAt: new Date().toISOString()
       }));
-      logInfo("Session parameters synced", { suppliersPerSession: slots });
+      logInfo("Session parameters synced", { suppliersPerSession: slots, sourceHeight });
     }
   } catch (error) {
     logWarn("Session params sync failed; reusing last-known value", { error: error instanceof Error ? error.message : String(error) });
@@ -573,29 +581,32 @@ async function syncSessionParameters(): Promise<void> {
 async function syncApplications(): Promise<void> {
   const appCounts: Record<string, number> = {};
   let nextKey = "";
+  const sourceHeight = Number(getIndexerState("last_processed_height") ?? 0);
 
   try {
     while (true) {
-      const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
+      const search = new URLSearchParams({ "pagination.limit": "250" });
       if (nextKey) search.set("pagination.key", nextKey);
       const response = await fetchJson<RestApplicationsResponse>(
         `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/application/application?${search.toString()}`
       );
       for (const app of response.applications ?? []) {
         const serviceId = app.service_configs?.[0]?.service_id;
-        if (serviceId) {
-          appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
-        }
+        if (!serviceId) continue;
+        const unstakeEnd = parseMaybeNumber(app.unstake_session_end_height);
+        if (unstakeEnd != null && sourceHeight > 0 && unstakeEnd <= sourceHeight) continue;
+        appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
       }
       nextKey = response.pagination?.next_key ?? "";
       if (!nextKey) break;
     }
 
     sessionSyncedAppsStaked = appCounts;
+    sessionSyncedHeight = sourceHeight;
     setIndexerState("session_apps_staked", JSON.stringify({
-      value: appCounts, fetchedAt: new Date().toISOString()
+      value: appCounts, sourceHeight, fetchedAt: new Date().toISOString()
     }));
-    logInfo("Applications synced", { totalApps: Object.values(appCounts).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appCounts).length });
+    logInfo("Applications synced", { totalApps: Object.values(appCounts).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appCounts).length, sourceHeight });
   } catch (error) {
     logWarn("Applications sync failed; reusing last-known values", { error: error instanceof Error ? error.message : String(error) });
   }
@@ -678,8 +689,14 @@ async function refreshPrice(): Promise<number> {
   return getCachedPrice();
 }
 
-function serializeDailyCache(rows: Array<{ day: string; relays: number; revenue_upokt: string }>): Array<{ day: string; relays: number; revenueUpokt: string }> {
-  return rows.map((row) => ({ day: row.day, relays: row.relays, revenueUpokt: row.revenue_upokt }));
+function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; revenue_upokt: string }>): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; revenueUpokt: string }> {
+  return rows.map((row) => ({
+    day: row.day,
+    relays: row.relays,
+    estimatedRelays: row.estimated_relays ?? undefined,
+    estimatedComputeUnits: row.estimated_compute_units ?? undefined,
+    revenueUpokt: row.revenue_upokt
+  }));
 }
 
 function setProviderDataCache<T>(key: string, data: T): void {
@@ -796,6 +813,16 @@ export async function rebuildIndexerCaches(): Promise<void> {
 
 async function maybeRebuildCaches(force = false): Promise<void> {
   if (!force && (!cacheDirty || Date.now() - lastCacheBuildAt < CACHE_INTERVAL_MS)) return;
+
+  if (Date.now() - lastSessionSyncAt > SESSION_SYNC_INTERVAL_MS) {
+    try {
+      await syncSessionData();
+      lastSessionSyncAt = Date.now();
+    } catch (error) {
+      logWarn("Periodic session sync failed", { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   await rebuildIndexerCaches();
 }
 
