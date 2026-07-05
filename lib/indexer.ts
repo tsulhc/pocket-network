@@ -12,6 +12,7 @@ import {
   getIndexedHeightCoverage,
   getIndexerState,
   getGlobalRelayCoverage,
+  getExistingBlockTime,
   getLatestIndexedFact,
   markIndexedHeightFailed,
   pruneIndexerData,
@@ -447,8 +448,17 @@ async function fetchBlockFacts(height: number, rpcUrls = RPC_URLS): Promise<Inde
     return [];
   }
 
-  const block = await fetchFromRpcPool<RpcBlockResponse>(`/block?height=${height}`, height, rpcUrls);
-  const blockTime = Date.parse(block.result?.block?.header?.time ?? "");
+  let blockTime = Number.NaN;
+  try {
+    const block = await fetchFromRpcPool<RpcBlockResponse>(`/block?height=${height}`, height, rpcUrls);
+    blockTime = Date.parse(block.result?.block?.header?.time ?? "");
+  } catch (error) {
+    logWarn("Block time fetch failed; trying cached fact block time", { height, error: formatError(error) });
+  }
+  if (!Number.isFinite(blockTime)) {
+    const cachedBlockTime = getExistingBlockTime(height);
+    if (cachedBlockTime != null) blockTime = cachedBlockTime;
+  }
   if (!Number.isFinite(blockTime)) {
     throw new Error(`Unable to read block time for height ${height}`);
   }

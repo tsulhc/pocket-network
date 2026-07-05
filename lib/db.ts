@@ -403,6 +403,15 @@ const selectProviderAggregatesStatement = db.prepare(
   `
 );
 
+const selectExistingBlockTimeStatement = db.prepare(
+  `
+    SELECT block_time
+    FROM settlement_facts
+    WHERE height = ?
+    LIMIT 1
+  `
+);
+
 const selectDailyAggregatesStatement = db.prepare(
   `
     SELECT
@@ -667,6 +676,11 @@ export function getGlobalRelayCoverage(sinceUnixMs: number): number {
 
 export function getIndexedServiceDailyAggregates(sinceUnixMs: number, serviceId: string): IndexedDailyAggregate[] {
   return selectServiceDailyAggregatesStatement.all(sinceUnixMs, serviceId) as IndexedDailyAggregate[];
+}
+
+export function getExistingBlockTime(height: number): number | null {
+  const row = selectExistingBlockTimeStatement.get(height) as { block_time: number } | undefined;
+  return row && Number.isFinite(row.block_time) ? row.block_time : null;
 }
 
 export function getLatestIndexedFact(): { height: number; block_time: number } | null {
