@@ -72,7 +72,8 @@ export type DashboardData = {
   activeChains: number;
   suppliersPerSession: number;
   appsStakedByService: Record<string, number>;
-  sessionSourceHeight: number;
+  /** Node's latest block height observed at session-snapshot time, NOT a pinned REST snapshot. */
+  sessionObservedHeight: number;
   sessionFetchedAt: string;
   sessionStale: boolean;
   providers: ProviderStats[];

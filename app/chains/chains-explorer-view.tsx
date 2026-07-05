@@ -7,7 +7,7 @@ import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, 
 import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS, SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import type { SerializedDashboardData, SerializedServiceStats } from "@/lib/types";
 
-type SortKey = "service" | "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "revenuePerProvider" | "opportunity";
+type SortKey = "service" | "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "appsStaked" | "revenuePerProvider" | "opportunity";
 type SortDirection = "asc" | "desc";
 
 type SortColumn = {
@@ -24,6 +24,7 @@ const SORT_COLUMNS: SortColumn[] = [
   { key: "relays", label: "Final Relays", align: "right" },
   { key: "providers", label: "Domains", align: "right" },
   { key: "suppliers", label: "Suppliers", align: "right" },
+  { key: "appsStaked", label: "Apps", align: "right", tooltip: "Number of applications staked for this service (live snapshot)." },
   { key: "revenuePerProvider", label: "Avg Domain Reward", align: "right" },
   {
     key: "opportunity",
@@ -64,6 +65,8 @@ function getSortValue(service: SerializedServiceStats, sort: SortKey, suppliersP
       return service.providerCount;
     case "suppliers":
       return service.supplierCount ?? 0;
+    case "appsStaked":
+      return service.appsStaked ?? 0;
     case "revenuePerProvider":
       return revenuePerProvider(service);
     case "opportunity":
@@ -264,7 +267,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
             {mode === "chains"
               ? "Search, sort, and open service-level chain details from a dedicated explorer."
               : "Top revenue chains first, then service demand signals without exposing provider identities."}
-            {data.sessionStale && <em className="muted"> Live session parameters are unavailable or stale; opportunity scores use fallback values.</em>}
+            {data.sessionStale && <em className="muted"> Session parameters are stale; opportunity scores use last-known values{data.sessionFetchedAt ? ` from ${data.sessionFetchedAt}` : ""}.</em>}
           </p>
         </div>
         
@@ -409,6 +412,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
               <option value="revenuePerProvider">Avg Domain Reward</option>
               <option value="computeUnits">Compute Units</option>
               <option value="suppliers">Supplier Count</option>
+              <option value="appsStaked">App Count</option>
             </select>
           </div>
         </div>
@@ -468,11 +472,17 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
                   <td className="right">{formatInteger(service.relays)}</td>
                   <td className="right">{formatInteger(service.providerCount)}</td>
                   <td className="right">{formatInteger(service.supplierCount ?? 0)}</td>
+                  <td className="right">{formatInteger(service.appsStaked ?? 0)}</td>
                   <td className="right" style={{ color: 'var(--green)', fontWeight: 600 }}>{formatDecimal(revenuePerProvider(service), 1)} POKT</td>
                   <td className="right">
                     <span className={`pill ${opportunity.opportunityScore >= 7 ? 'density-low' : opportunity.opportunityScore >= 4 ? 'density-medium' : 'density-high'}`} style={{ fontSize: '0.7rem' }}>
                       {formatDecimal(opportunity.opportunityScore, 1)} score
                     </span>
+                    {service.appsStaked != null && service.appsStaked > 0 && (
+                      <div className="muted" style={{ fontSize: '0.7rem', marginTop: '4px' }}>
+                        {formatDecimal(opportunity.expectedAssignments ?? 0, 1)} exp. / {formatDecimal(opportunity.expectedSessionsRepresented ?? 0, 1)} sessions
+                      </div>
+                    )}
                   </td>
                 </tr>
               )})}

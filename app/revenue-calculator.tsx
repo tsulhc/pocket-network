@@ -24,7 +24,7 @@ type RevenueCalculatorProps = {
   poktPriceUsd: number;
   services: CalculatorService[];
   suppliersPerSession?: number;
-  sessionSourceHeight?: number;
+  sessionObservedHeight?: number;
   sessionFetchedAt?: string;
   sessionStale?: boolean;
 };
@@ -42,7 +42,7 @@ function toUsdFromUpokt(value: bigint, poktPriceUsd: number): number {
   return (Number(value) / 1_000_000) * poktPriceUsd;
 }
 
-export default function RevenueCalculator({ poktPriceUsd, services, suppliersPerSession, sessionSourceHeight, sessionFetchedAt, sessionStale }: RevenueCalculatorProps) {
+export default function RevenueCalculator({ poktPriceUsd, services, suppliersPerSession, sessionObservedHeight, sessionFetchedAt, sessionStale }: RevenueCalculatorProps) {
   const liveSuppliersPerSession = suppliersPerSession ?? SESSION_SUPPLIER_SLOTS;
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
     services.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId)
@@ -116,7 +116,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
                 Our model assumes <strong>{liveSuppliersPerSession} slots</strong> per session.
                 {sessionStale && (
                   <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
-                    Live session parameters are unavailable or stale{sessionFetchedAt ? ` (last fetched ${sessionFetchedAt})` : ""}; fallback values are in use.
+                    Session parameters are stale; last-known snapshot{sessionFetchedAt ? ` from ${sessionFetchedAt}` : ""} is in use.
                   </em>
                 )}
               </p>

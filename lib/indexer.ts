@@ -108,7 +108,7 @@ type SerializedDashboardCache = {
   activeChains: number;
   suppliersPerSession: number;
   appsStakedByService: Record<string, number>;
-  sessionSourceHeight: number;
+  sessionObservedHeight: number;
   sessionFetchedAt: string;
   sessionStale: boolean;
   providers: Array<{
@@ -189,6 +189,8 @@ const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ??
 const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 4);
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
+const MIGRATION_MAX_RETRIES = 3;
+const MIGRATION_RETRY_DELAY_MS = 5000;
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
 const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
@@ -203,7 +205,7 @@ let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
-const INDEXER_DATA_VERSION = 1;
+const INDEXER_DATA_VERSION = 2;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
@@ -640,40 +642,62 @@ async function syncSessionData(): Promise<boolean> {
   sessionSyncedHeight = snapshotHeight;
   sessionSuppliersFetchedAt = fetchedAt;
   sessionAppsFetchedAt = fetchedAt;
-  setIndexerState("session_suppliers_per_session", JSON.stringify({
-    value: paramsResult.slots, sourceHeight: snapshotHeight, fetchedAt
+  setIndexerState("session_snapshot", JSON.stringify({
+    suppliersPerSession: paramsResult.slots,
+    appsStaked: appsResult.apps,
+    observedHeight: snapshotHeight,
+    fetchedAt
   }));
-  setIndexerState("session_apps_staked", JSON.stringify({
-    value: appsResult.apps, sourceHeight: snapshotHeight, fetchedAt
-  }));
-  logInfo("Session snapshot published", { suppliersPerSession: paramsResult.slots, totalApps: Object.values(appsResult.apps).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appsResult.apps).length, sourceHeight: snapshotHeight });
+  logInfo("Session snapshot published", { suppliersPerSession: paramsResult.slots, totalApps: Object.values(appsResult.apps).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appsResult.apps).length, observedHeight: snapshotHeight });
   return true;
 }
 
 function warmupSessionState(): void {
   try {
-    const slotsRaw = getIndexerState("session_suppliers_per_session");
-    if (slotsRaw) {
-      const parsed = JSON.parse(slotsRaw) as { value: number; sourceHeight?: number; fetchedAt?: string };
-      if (Number.isFinite(parsed.value) && parsed.value > 0) {
-        sessionSyncedSlots = parsed.value;
-        if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
-        if (parsed.fetchedAt) sessionSuppliersFetchedAt = parsed.fetchedAt;
+    const snapshotRaw = getIndexerState("session_snapshot");
+    if (snapshotRaw) {
+      const parsed = JSON.parse(snapshotRaw) as { suppliersPerSession?: number; appsStaked?: Record<string, number>; observedHeight?: number; fetchedAt?: string };
+      if (Number.isFinite(parsed.suppliersPerSession) && parsed.suppliersPerSession != null && parsed.suppliersPerSession > 0) {
+        sessionSyncedSlots = parsed.suppliersPerSession;
+      }
+      if (parsed.appsStaked && typeof parsed.appsStaked === "object") {
+        sessionSyncedAppsStaked = parsed.appsStaked;
+      }
+      if (parsed.observedHeight != null) sessionSyncedHeight = parsed.observedHeight;
+      if (parsed.fetchedAt) {
+        sessionSuppliersFetchedAt = parsed.fetchedAt;
+        sessionAppsFetchedAt = parsed.fetchedAt;
       }
     }
   } catch { /* keep null */ }
 
-  try {
-    const appsRaw = getIndexerState("session_apps_staked");
-    if (appsRaw) {
-      const parsed = JSON.parse(appsRaw) as { value: Record<string, number>; sourceHeight?: number; fetchedAt?: string };
-      if (parsed.value && typeof parsed.value === "object") {
-        sessionSyncedAppsStaked = parsed.value;
-        if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
-        if (parsed.fetchedAt) sessionAppsFetchedAt = parsed.fetchedAt;
+  if (sessionSyncedSlots == null) {
+    try {
+      const slotsRaw = getIndexerState("session_suppliers_per_session");
+      if (slotsRaw) {
+        const parsed = JSON.parse(slotsRaw) as { value: number; sourceHeight?: number; fetchedAt?: string };
+        if (Number.isFinite(parsed.value) && parsed.value > 0) {
+          sessionSyncedSlots = parsed.value;
+          if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
+          if (parsed.fetchedAt) sessionSuppliersFetchedAt = parsed.fetchedAt;
+        }
       }
-    }
-  } catch { /* keep null */ }
+    } catch { /* keep null */ }
+  }
+
+  if (sessionSyncedAppsStaked == null) {
+    try {
+      const appsRaw = getIndexerState("session_apps_staked");
+      if (appsRaw) {
+        const parsed = JSON.parse(appsRaw) as { value: Record<string, number>; sourceHeight?: number; fetchedAt?: string };
+        if (parsed.value && typeof parsed.value === "object") {
+          sessionSyncedAppsStaked = parsed.value;
+          if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
+          if (parsed.fetchedAt) sessionAppsFetchedAt = parsed.fetchedAt;
+        }
+      }
+    } catch { /* keep null */ }
+  }
 }
 
 function windowMs(window: TimeWindow): number {
@@ -826,7 +850,7 @@ export async function rebuildIndexerCaches(): Promise<void> {
         activeChains: services.length,
         suppliersPerSession: liveSuppliersPerSession,
         appsStakedByService: liveAppsStaked,
-        sessionSourceHeight: sessionSyncedHeight ?? 0,
+        sessionObservedHeight: sessionSyncedHeight ?? 0,
         sessionFetchedAt: oldestFetchedAt,
         sessionStale,
         providers,
@@ -1146,8 +1170,18 @@ async function runDataMigration(): Promise<void> {
   let totalFailed = 0;
   for (let i = 0; i < indexedHeights.length; i += REPAIR_BATCH_SIZE) {
     const batch = indexedHeights.slice(i, i + REPAIR_BATCH_SIZE);
-    const result = await processRepairHeights(batch, REPAIR_CONCURRENCY, "data-migration");
-    totalFailed += result.failed;
+    let lastResult: { repaired: number; failed: number; events: number } = { repaired: 0, failed: batch.length, events: 0 };
+    for (let attempt = 0; attempt < MIGRATION_MAX_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        const delay = MIGRATION_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+        logWarn("Retrying failed migration batch", { attempt: attempt + 1, batchSize: batch.length, delay });
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      lastResult = await processRepairHeights(batch, REPAIR_CONCURRENCY, "data-migration");
+      if (lastResult.failed === 0) break;
+      logWarn("Migration batch had failures", { attempt: attempt + 1, failed: lastResult.failed, batchSize: batch.length });
+    }
+    totalFailed += lastResult.failed;
   }
 
   if (totalFailed > 0) {

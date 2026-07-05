@@ -283,7 +283,7 @@ export default async function RewardsPage() {
         <div className="section-title-row">
           <div>
             <h2 className="section-title">Top 4 Opportunities</h2>
-            <p className="section-subtitle">Best services for a new provider based on an experimental opportunity score.{data.sessionStale && <em className="muted"> Live session parameters are unavailable or stale; scores use fallback values.</em>}</p>
+            <p className="section-subtitle">Best services for a new provider based on an experimental opportunity score.{data.sessionStale && <em className="muted"> Session parameters are stale; opportunity scores use last-known values{data.sessionFetchedAt ? ` from ${data.sessionFetchedAt}` : ""}.</em>}</p>
           </div>
           <Link href="/chains" className="calculator-action" style={{ background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', boxShadow: 'none' }}>
             Explore all services →
@@ -300,6 +300,9 @@ export default async function RewardsPage() {
                 <div><strong style={{ color: 'var(--accent)' }}>{formatDecimal(opportunity.opportunityScore, 1)}</strong> score</div>
                 <div className="muted" style={{ fontSize: '0.8rem' }}>{formatUpokt(opportunity.equalShareRevenueEstimateUpokt, 1)} projected over 15 suppliers</div>
                 <div className="muted" style={{ fontSize: '0.8rem' }}>{formatPercent(opportunity.selectionProbability, 1)} selection probability</div>
+                {service.appsStaked != null && service.appsStaked > 0 && (
+                  <div className="muted" style={{ fontSize: '0.8rem' }}>{formatInteger(service.appsStaked)} apps · {formatDecimal(opportunity.expectedAssignments ?? 0, 1)} exp. sessions</div>
+                )}
               </div>
               <div style={{ marginTop: '12px' }}>
                 <Link href={`/chains/${encodeURIComponent(service.serviceId)}`} className="calculator-action" style={{ width: '100%', justifyContent: 'center', background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', boxShadow: 'none' }}>

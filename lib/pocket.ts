@@ -1590,7 +1590,7 @@ function buildDashboardFromProviderRows(
     latestSettlementTime?: string | null;
     suppliersPerSession?: number;
     appsStakedByService?: Record<string, number>;
-    sessionSourceHeight?: number;
+    sessionObservedHeight?: number;
     sessionFetchedAt?: string;
     sessionStale?: boolean;
   }
@@ -1761,7 +1761,7 @@ function buildDashboardFromProviderRows(
     activeChains: services.length,
     suppliersPerSession: options?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS,
     appsStakedByService: options?.appsStakedByService ?? {},
-    sessionSourceHeight: options?.sessionSourceHeight ?? 0,
+    sessionObservedHeight: options?.sessionObservedHeight ?? 0,
     sessionFetchedAt: options?.sessionFetchedAt ?? "",
     sessionStale: options?.sessionStale ?? true,
     providers,
@@ -1779,7 +1779,7 @@ function buildDashboard(
   sessionData?: {
     suppliersPerSession?: number;
     appsStakedByService?: Record<string, number>;
-    sessionSourceHeight?: number;
+    sessionObservedHeight?: number;
     sessionFetchedAt?: string;
     sessionStale?: boolean;
   }
@@ -1934,7 +1934,7 @@ function buildDashboard(
     activeChains: services.length,
     suppliersPerSession: sessionData?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS,
     appsStakedByService: sessionData?.appsStakedByService ?? {},
-    sessionSourceHeight: sessionData?.sessionSourceHeight ?? 0,
+    sessionObservedHeight: sessionData?.sessionObservedHeight ?? 0,
     sessionFetchedAt: sessionData?.sessionFetchedAt ?? "",
     sessionStale: sessionData?.sessionStale ?? true,
     providers,

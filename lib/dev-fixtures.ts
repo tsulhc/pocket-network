@@ -103,7 +103,7 @@ export function getDevelopmentDashboardData(window: TimeWindow): DashboardData {
     activeChains: services.length,
     suppliersPerSession: SESSION_SUPPLIER_SLOTS,
     appsStakedByService: Object.fromEntries(services.map((s) => [s.serviceId, s.providerCount])),
-    sessionSourceHeight: 812_338,
+    sessionObservedHeight: 812_338,
     sessionFetchedAt: now.toISOString(),
     sessionStale: false,
     providers,
