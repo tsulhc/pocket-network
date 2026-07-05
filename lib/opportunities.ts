@@ -95,7 +95,9 @@ export function getExpectedAssignments(
   totalSuppliers: number
 ): number {
   if (appsStaked <= 0 || enteringSupplierCount <= 0 || totalSuppliers <= 0) return 0;
-  const K = Math.min(Math.max(1, Math.round(sessionSlots)), Math.round(totalSuppliers));
+  const slots = Math.round(sessionSlots);
+  if (slots <= 0) return 0;
+  const K = Math.min(slots, Math.round(totalSuppliers));
   return appsStaked * K * enteringSupplierCount / totalSuppliers;
 }
 

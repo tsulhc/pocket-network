@@ -594,7 +594,7 @@ async function syncApplications(): Promise<void> {
         const serviceId = app.service_configs?.[0]?.service_id;
         if (!serviceId) continue;
         const unstakeEnd = parseMaybeNumber(app.unstake_session_end_height);
-        if (unstakeEnd != null && sourceHeight > 0 && unstakeEnd <= sourceHeight) continue;
+        if (unstakeEnd != null && unstakeEnd > 0 && sourceHeight > 0 && unstakeEnd <= sourceHeight) continue;
         appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
       }
       nextKey = response.pagination?.next_key ?? "";
