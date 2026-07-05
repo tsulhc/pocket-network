@@ -283,7 +283,7 @@ export default async function RewardsPage() {
         <div className="section-title-row">
           <div>
             <h2 className="section-title">Top 4 Opportunities</h2>
-            <p className="section-subtitle">Best services for a new provider based on an experimental opportunity score.</p>
+            <p className="section-subtitle">Best services for a new provider based on an experimental opportunity score.{data.sessionStale && <em className="muted"> Live session parameters are unavailable or stale; scores use fallback values.</em>}</p>
           </div>
           <Link href="/chains" className="calculator-action" style={{ background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', boxShadow: 'none' }}>
             Explore all services →

@@ -202,6 +202,7 @@ let cacheDirty = true;
 let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
+const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
 const INDEXER_DATA_VERSION = 1;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
@@ -535,6 +536,8 @@ async function syncSupplierDomains(): Promise<void> {
 let sessionSyncedAppsStaked: Record<string, number> | null = null;
 let sessionSyncedSlots: number | null = null;
 let sessionSyncedHeight: number | null = null;
+let sessionSuppliersFetchedAt: string | null = null;
+let sessionAppsFetchedAt: string | null = null;
 
 function getSessionAppsStaked(): Record<string, number> | null {
   return sessionSyncedAppsStaked;
@@ -559,42 +562,31 @@ type RestApplicationsResponse = {
     pending_transfer?: { session_end_height?: string | number };
   }>;
   pagination?: { next_key?: string; total?: string };
-  height?: string | number;
 };
 
 type RestSessionParamsResponse = {
   params?: { num_suppliers_per_session?: string | number };
-  height?: string | number;
 };
 
-async function syncSessionParameters(): Promise<boolean> {
+async function syncSessionParameters(snapshotHeight: number): Promise<{ ok: boolean; slots?: number }> {
   try {
     const response = await fetchJson<RestSessionParamsResponse>(
       `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/session/params`
     );
     const slots = parseMaybeNumber(response.params?.num_suppliers_per_session);
-    const queryHeight = parseMaybeNumber(response.height);
-    const sourceHeight = queryHeight ?? Number(getIndexerState("last_processed_height") ?? 0);
     if (slots != null && slots > 0) {
-      sessionSyncedSlots = slots;
-      sessionSyncedHeight = sourceHeight;
-      setIndexerState("session_suppliers_per_session", JSON.stringify({
-        value: slots, sourceHeight, fetchedAt: new Date().toISOString()
-      }));
-      logInfo("Session parameters synced", { suppliersPerSession: slots, sourceHeight });
-      return true;
+      return { ok: true, slots };
     }
-    return false;
+    return { ok: false };
   } catch (error) {
     logWarn("Session params sync failed; reusing last-known value", { error: error instanceof Error ? error.message : String(error) });
-    return false;
+    return { ok: false };
   }
 }
 
-async function syncApplications(): Promise<boolean> {
+async function syncApplications(snapshotHeight: number): Promise<{ ok: boolean; apps?: Record<string, number> }> {
   const appCounts: Record<string, number> = {};
   let nextKey = "";
-  let sourceHeight = Number(getIndexerState("last_processed_height") ?? 0);
 
   try {
     while (true) {
@@ -603,56 +595,83 @@ async function syncApplications(): Promise<boolean> {
       const response = await fetchJson<RestApplicationsResponse>(
         `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/application/application?${search.toString()}`
       );
-      if (sourceHeight === 0) {
-        const queryHeight = parseMaybeNumber(response.height);
-        if (queryHeight != null && queryHeight > 0) sourceHeight = queryHeight;
-      }
       for (const app of response.applications ?? []) {
         const serviceId = app.service_configs?.[0]?.service_id;
         if (!serviceId) continue;
         const unstakeEnd = parseMaybeNumber(app.unstake_session_end_height);
-        if (unstakeEnd != null && unstakeEnd > 0 && sourceHeight > unstakeEnd) continue;
+        if (unstakeEnd != null && unstakeEnd > 0 && snapshotHeight > unstakeEnd) continue;
         const transferEnd = parseMaybeNumber(app.pending_transfer?.session_end_height);
-        if (transferEnd != null && transferEnd > 0 && sourceHeight > transferEnd) continue;
+        if (transferEnd != null && transferEnd > 0 && snapshotHeight > transferEnd) continue;
         appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
       }
       nextKey = response.pagination?.next_key ?? "";
       if (!nextKey) break;
     }
 
-    sessionSyncedAppsStaked = appCounts;
-    sessionSyncedHeight = sourceHeight;
-    setIndexerState("session_apps_staked", JSON.stringify({
-      value: appCounts, sourceHeight, fetchedAt: new Date().toISOString()
-    }));
-    logInfo("Applications synced", { totalApps: Object.values(appCounts).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appCounts).length, sourceHeight });
-    return true;
+    return { ok: true, apps: appCounts };
   } catch (error) {
     logWarn("Applications sync failed; reusing last-known values", { error: error instanceof Error ? error.message : String(error) });
-    return false;
+    return { ok: false };
   }
 }
 
 async function syncSessionData(): Promise<boolean> {
-  const paramsOk = await syncSessionParameters();
-  const appsOk = await syncApplications();
-  return paramsOk && appsOk;
+  let snapshotHeight: number;
+  try {
+    snapshotHeight = await getLatestHeight();
+  } catch (error) {
+    logWarn("Session sync aborted; unable to determine current node height", { error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+
+  const [paramsResult, appsResult] = await Promise.all([
+    syncSessionParameters(snapshotHeight),
+    syncApplications(snapshotHeight)
+  ]);
+
+  if (!paramsResult.ok || !appsResult.ok || paramsResult.slots == null || appsResult.apps == null) {
+    logWarn("Session sync incomplete; keeping last-known snapshot", { paramsOk: paramsResult.ok, appsOk: appsResult.ok });
+    return false;
+  }
+
+  const fetchedAt = new Date().toISOString();
+  sessionSyncedSlots = paramsResult.slots;
+  sessionSyncedAppsStaked = appsResult.apps;
+  sessionSyncedHeight = snapshotHeight;
+  sessionSuppliersFetchedAt = fetchedAt;
+  sessionAppsFetchedAt = fetchedAt;
+  setIndexerState("session_suppliers_per_session", JSON.stringify({
+    value: paramsResult.slots, sourceHeight: snapshotHeight, fetchedAt
+  }));
+  setIndexerState("session_apps_staked", JSON.stringify({
+    value: appsResult.apps, sourceHeight: snapshotHeight, fetchedAt
+  }));
+  logInfo("Session snapshot published", { suppliersPerSession: paramsResult.slots, totalApps: Object.values(appsResult.apps).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appsResult.apps).length, sourceHeight: snapshotHeight });
+  return true;
 }
 
 function warmupSessionState(): void {
   try {
     const slotsRaw = getIndexerState("session_suppliers_per_session");
     if (slotsRaw) {
-      const parsed = JSON.parse(slotsRaw) as { value: number };
-      if (Number.isFinite(parsed.value) && parsed.value > 0) sessionSyncedSlots = parsed.value;
+      const parsed = JSON.parse(slotsRaw) as { value: number; sourceHeight?: number; fetchedAt?: string };
+      if (Number.isFinite(parsed.value) && parsed.value > 0) {
+        sessionSyncedSlots = parsed.value;
+        if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
+        if (parsed.fetchedAt) sessionSuppliersFetchedAt = parsed.fetchedAt;
+      }
     }
   } catch { /* keep null */ }
 
   try {
     const appsRaw = getIndexerState("session_apps_staked");
     if (appsRaw) {
-      const parsed = JSON.parse(appsRaw) as { value: Record<string, number> };
-      if (parsed.value && typeof parsed.value === "object") sessionSyncedAppsStaked = parsed.value;
+      const parsed = JSON.parse(appsRaw) as { value: Record<string, number>; sourceHeight?: number; fetchedAt?: string };
+      if (parsed.value && typeof parsed.value === "object") {
+        sessionSyncedAppsStaked = parsed.value;
+        if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
+        if (parsed.fetchedAt) sessionAppsFetchedAt = parsed.fetchedAt;
+      }
     }
   } catch { /* keep null */ }
 }
@@ -742,14 +761,14 @@ export async function rebuildIndexerCaches(): Promise<void> {
     const poktPriceUsd = await refreshPrice();
     const liveSuppliersPerSession = sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
     const liveAppsStaked = sessionSyncedAppsStaked ?? {};
-    const sessionFetchedAt = (() => {
-      try {
-        const raw = getIndexerState("session_apps_staked");
-        if (raw) return (JSON.parse(raw) as { fetchedAt?: string }).fetchedAt ?? "";
-      } catch { /* ignore */ }
-      return "";
-    })();
-    const sessionStale = sessionSyncedSlots == null || sessionSyncedAppsStaked == null;
+    const oldestFetchedAt = [sessionSuppliersFetchedAt, sessionAppsFetchedAt]
+      .filter((value): value is string => value != null)
+      .sort()[0] ?? "";
+    const oldestFetchedAtMs = oldestFetchedAt ? new Date(oldestFetchedAt).getTime() : NaN;
+    const sessionStale = sessionSyncedSlots == null
+      || sessionSyncedAppsStaked == null
+      || !Number.isFinite(oldestFetchedAtMs)
+      || Date.now() - oldestFetchedAtMs > SESSION_FRESHNESS_MS;
 
     for (const window of WINDOWS) {
       const since = window === "30d" ? getStartOfTodayUtc() - windowMs(window) : Date.now() - windowMs(window);
@@ -808,7 +827,7 @@ export async function rebuildIndexerCaches(): Promise<void> {
         suppliersPerSession: liveSuppliersPerSession,
         appsStakedByService: liveAppsStaked,
         sessionSourceHeight: sessionSyncedHeight ?? 0,
-        sessionFetchedAt,
+        sessionFetchedAt: oldestFetchedAt,
         sessionStale,
         providers,
         services
@@ -1124,9 +1143,16 @@ async function runDataMigration(): Promise<void> {
 
   logInfo("Running data migration", { fromVersion: storedVersion, toVersion: INDEXER_DATA_VERSION, heightCount: indexedHeights.length });
 
+  let totalFailed = 0;
   for (let i = 0; i < indexedHeights.length; i += REPAIR_BATCH_SIZE) {
     const batch = indexedHeights.slice(i, i + REPAIR_BATCH_SIZE);
-    await processRepairHeights(batch, REPAIR_CONCURRENCY, "data-migration");
+    const result = await processRepairHeights(batch, REPAIR_CONCURRENCY, "data-migration");
+    totalFailed += result.failed;
+  }
+
+  if (totalFailed > 0) {
+    logWarn("Data migration incomplete; not advancing version", { version: INDEXER_DATA_VERSION, totalFailed });
+    return;
   }
 
   setIndexerState("data_version", String(INDEXER_DATA_VERSION));
@@ -1326,6 +1352,8 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
 
   try {
     logInfo("Starting Pocket indexer", options as Record<string, unknown>);
+    await runDataMigration();
+
     if (liveFirst) {
       void runLiveStartupTasks().catch((error) => logError("Live startup background tasks failed", error));
       finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt, liveFirst: true });
@@ -1336,7 +1364,6 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
     await syncServices();
     await syncSupplierDomains();
     await syncSessionData();
-    await runDataMigration();
     await runCatchup(options);
     pruneIndexerData(RETENTION_DAYS);
     finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt });

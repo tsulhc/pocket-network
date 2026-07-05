@@ -17,11 +17,16 @@ type CalculatorService = {
   revenueUpokt: string;
   providerCount: number;
   supplierCount?: number;
+  appsStaked?: number;
 };
 
 type RevenueCalculatorProps = {
   poktPriceUsd: number;
   services: CalculatorService[];
+  suppliersPerSession?: number;
+  sessionSourceHeight?: number;
+  sessionFetchedAt?: string;
+  sessionStale?: boolean;
 };
 
 const FREE_SUPPLIER_BUDGET = DEFAULT_NEW_PROVIDER_SUPPLIERS;
@@ -37,7 +42,8 @@ function toUsdFromUpokt(value: bigint, poktPriceUsd: number): number {
   return (Number(value) / 1_000_000) * poktPriceUsd;
 }
 
-export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCalculatorProps) {
+export default function RevenueCalculator({ poktPriceUsd, services, suppliersPerSession, sessionSourceHeight, sessionFetchedAt, sessionStale }: RevenueCalculatorProps) {
+  const liveSuppliersPerSession = suppliersPerSession ?? SESSION_SUPPLIER_SLOTS;
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
     services.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId)
   );
@@ -55,7 +61,7 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
   const selectedRevenueUpokt = selectedServices.reduce((sum, service) => sum + BigInt(service.revenueUpokt), 0n);
   const selectedRelays = selectedServices.reduce((sum, service) => sum + service.relays, 0);
   const serviceOpportunities = selectedServices.map((service) =>
-    buildAllocatedServiceOpportunity(service, supplierCount, supplierAllocation.get(service.serviceId) ?? 0)
+    buildAllocatedServiceOpportunity(service, supplierCount, supplierAllocation.get(service.serviceId) ?? 0, { sessionSlots: liveSuppliersPerSession, appsStaked: service.appsStaked })
   );
   const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.equalShareRevenueEstimateUpokt, 0n);
   const selectedChainCount = selectedServices.length;
@@ -107,7 +113,12 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
              <strong style={{ display: 'block', margin: '8px 0', fontSize: '1.5rem', color: 'var(--accent)' }}>15 Subsidized Units</strong>
               <p style={{ fontSize: '0.9rem' }}>
                 Pocket Network Foundation provides <strong>15 free suppliers</strong> to bootstrap new providers. 
-                Our model assumes <strong>{SESSION_SUPPLIER_SLOTS} slots</strong> per session.
+                Our model assumes <strong>{liveSuppliersPerSession} slots</strong> per session.
+                {sessionStale && (
+                  <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
+                    Live session parameters are unavailable or stale{sessionFetchedAt ? ` (last fetched ${sessionFetchedAt})` : ""}; fallback values are in use.
+                  </em>
+                )}
               </p>
             </div>
 

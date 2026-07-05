@@ -264,6 +264,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
             {mode === "chains"
               ? "Search, sort, and open service-level chain details from a dedicated explorer."
               : "Top revenue chains first, then service demand signals without exposing provider identities."}
+            {data.sessionStale && <em className="muted"> Live session parameters are unavailable or stale; opportunity scores use fallback values.</em>}
           </p>
         </div>
         
