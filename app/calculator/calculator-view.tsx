@@ -1,0 +1,41 @@
+"use client";
+
+import RevenueCalculator from "@/app/revenue-calculator";
+import type { SerializedDashboardData } from "@/lib/types";
+
+type CalculatorService = {
+  serviceId: string;
+  serviceName: string;
+  relays: number;
+  revenueUpokt: string;
+  providerCount: number;
+  supplierCount?: number;
+  appsStaked?: number;
+};
+
+export default function CalculatorView({ data }: { data: SerializedDashboardData }) {
+  const services: CalculatorService[] = data.services.map((s) => ({
+    serviceId: s.serviceId,
+    serviceName: s.serviceName,
+    relays: s.relays,
+    revenueUpokt: s.revenueUpokt,
+    providerCount: s.providerCount,
+    supplierCount: s.supplierCount,
+    appsStaked: s.appsStaked,
+  }));
+
+  return (
+    <main className="page">
+      <section className="panel section themed section-theme-revenue">
+        <RevenueCalculator
+          poktPriceUsd={data.poktPriceUsd}
+          services={services}
+          suppliersPerSession={data.suppliersPerSession}
+          sessionObservedHeight={data.sessionObservedHeight}
+          sessionFetchedAt={data.sessionFetchedAt}
+          sessionStale={data.sessionStale}
+        />
+      </section>
+    </main>
+  );
+}

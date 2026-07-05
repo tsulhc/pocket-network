@@ -1,6 +1,8 @@
 import { cache } from "react";
 
 import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getMeta, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
+import { getDevelopmentDashboardData, getDevelopmentNetworkDailyHistory, getDevelopmentServiceDailyHistory, isDevelopmentDummyDataEnabled } from "@/lib/dev-fixtures";
+import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import { PROVIDER_DOMAIN_LABEL_OVERRIDES, SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
 import type {
   DashboardData,
@@ -227,7 +229,8 @@ const DEFAULT_RPC_URLS = [
 
 const DEFAULT_RPC_URL = process.env.POCKET_RPC_URL ?? DEFAULT_RPC_URLS[0];
 const DEFAULT_REST_URL = process.env.POCKET_REST_URL ?? "https://sauron-api.infra.pocket.network";
-const DEFAULT_POKTSCAN_URL = process.env.POKTSCAN_API_URL ?? "https://api.poktscan.com/";
+const DEFAULT_POKTSCAN_URL = process.env.POKTSCAN_API_URL ?? "https://data.pocket.network/";
+const LEGACY_RPC_FALLBACK_ENABLED = process.env.POCKET_LEGACY_RPC_FALLBACK_ENABLED === "true";
 const RPC_URLS = Array.from(
   new Set(
     (process.env.POCKET_RPC_URLS ?? "")
@@ -242,9 +245,12 @@ const RPC_URLS = Array.from(
 const SERVICES_PATH = "/pokt-network/poktroll/service/service";
 const SUPPLIERS_PATH = "/pokt-network/poktroll/supplier/supplier";
 const CACHE_TTL_MS = 60 * 60 * 1000;
+const UI_MEMORY_CACHE_TTL_MS = Number(process.env.POCKET_UI_MEMORY_CACHE_MS ?? 30_000);
 const SUPPLIER_DIRECTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_RPC_TIMEOUT_MS = 5_000;
 const BLOCK_RESULTS_TIMEOUT_MS = 8_000;
+const PRICE_TIMEOUT_MS = Number(process.env.POCKET_PRICE_TIMEOUT_MS ?? 20_000);
+const PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=pocket-network&vs_currencies=usd";
 const POKTSCAN_TIMEOUT_MS = 15_000;
 const POKTSCAN_MAX_ATTEMPTS = 4;
 const POKTSCAN_MAX_CONCURRENCY = 2;
@@ -259,7 +265,8 @@ const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "c
 const SAMPLE_BLOCKS_PER_WINDOW: Record<TimeWindow, number> = {
   "24h": 36,
   "7d": 72,
-  "30d": 144
+  "30d": 144,
+  "365d": 144
 };
 const PROVIDER_HISTORY_DAYS = 30;
 const BLOCK_SEARCH_TIMEOUT_MS = 2_500;
@@ -451,12 +458,14 @@ async function fetchJsonFromRpcPool<T>(path: string, options?: { seed?: number; 
   throw lastError instanceof Error ? lastError : new Error(`All RPC requests failed for path ${path}`);
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, timeoutMs?: number): Promise<T> {
   const response = await fetch(url, {
     headers: {
-      accept: "application/json"
+      accept: "application/json",
+      "user-agent": "pocket-dashboard/1.0"
     },
-    cache: "no-store"
+    cache: "no-store",
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
   });
 
   if (!response.ok) {
@@ -469,6 +478,12 @@ async function fetchJson<T>(url: string): Promise<T> {
 async function fetchPoktscan<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const operationName = getGraphqlOperationName(query);
   let lastError: unknown;
+
+  logDataInfo("Starting Poktscan GraphQL request", {
+    operationName,
+    url: DEFAULT_POKTSCAN_URL,
+    variables
+  });
 
   for (let attempt = 1; attempt <= POKTSCAN_MAX_ATTEMPTS; attempt += 1) {
     const startedAt = Date.now();
@@ -644,9 +659,7 @@ async function getPoktPriceUsd(): Promise<number> {
   }
 
   try {
-    const response = await fetchJson<CoinGeckoPriceResponse>(
-      "https://api.coingecko.com/api/v3/simple/price?ids=pocket-network&vs_currencies=usd"
-    );
+    const response = await fetchJson<CoinGeckoPriceResponse>(PRICE_URL, PRICE_TIMEOUT_MS);
     const value = response["pocket-network"]?.usd ?? 0;
 
     priceCache = { value, expiresAt: Date.now() + CACHE_TTL_MS };
@@ -911,6 +924,8 @@ function getWindowStart(window: TimeWindow): Date {
       return new Date(now - 7 * 24 * 60 * 60 * 1000);
     case "30d":
       return new Date(now - 30 * 24 * 60 * 60 * 1000);
+    case "365d":
+      return new Date(now - 365 * 24 * 60 * 60 * 1000);
   }
 }
 
@@ -1238,7 +1253,7 @@ function hydrateDashboardCache(window: TimeWindow): DashboardData | null {
     }
     dashboardCache.set(window, {
       data,
-      expiresAt: new Date(persisted.updatedAt).getTime() + CACHE_TTL_MS
+      expiresAt: Date.now() + UI_MEMORY_CACHE_TTL_MS
     });
     return data;
   } catch {
@@ -1248,7 +1263,7 @@ function hydrateDashboardCache(window: TimeWindow): DashboardData | null {
 
 function persistDashboard(window: TimeWindow, data: DashboardData): DashboardData {
   dashboardCache.set(window, {
-    expiresAt: Date.now() + CACHE_TTL_MS,
+    expiresAt: Date.now() + UI_MEMORY_CACHE_TTL_MS,
     data
   });
   setDashboardCache(window, JSON.stringify(serializeDashboardData(data)));
@@ -1257,7 +1272,7 @@ function persistDashboard(window: TimeWindow, data: DashboardData): DashboardDat
 
 function getCachedDashboardSnapshot(window: TimeWindow): DashboardData | null {
   const cached = dashboardCache.get(window);
-  if (hasServiceSupplierCounts(cached?.data)) {
+  if (cached && cached.expiresAt > Date.now() && hasServiceSupplierCounts(cached.data)) {
     return cached.data;
   }
 
@@ -1573,6 +1588,11 @@ function buildDashboardFromProviderRows(
     indexerTargetHeight?: number;
     earliestSettlementTime?: string | null;
     latestSettlementTime?: string | null;
+    suppliersPerSession?: number;
+    appsStakedByService?: Record<string, number>;
+    sessionObservedHeight?: number;
+    sessionFetchedAt?: string;
+    sessionStale?: boolean;
   }
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
@@ -1733,9 +1753,17 @@ function buildDashboardFromProviderRows(
     earliestSettlementTime: options?.earliestSettlementTime ?? null,
     latestSettlementTime: options?.latestSettlementTime ?? null,
     totalRelays,
+    totalEstimatedRelays: totalRelays,
+    totalEstimatedComputeUnits: 0,
+    relayCoverage: 0,
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
+    suppliersPerSession: options?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS,
+    appsStakedByService: options?.appsStakedByService ?? {},
+    sessionObservedHeight: options?.sessionObservedHeight ?? 0,
+    sessionFetchedAt: options?.sessionFetchedAt ?? "",
+    sessionStale: options?.sessionStale ?? true,
     providers,
     services
   };
@@ -1747,7 +1775,14 @@ function buildDashboard(
   settlements: SettlementEvent[],
   serviceSupplierCounts: ServiceSupplierCounts,
   supplierDirectory: SupplierDirectory,
-  poktPriceUsd: number
+  poktPriceUsd: number,
+  sessionData?: {
+    suppliersPerSession?: number;
+    appsStakedByService?: Record<string, number>;
+    sessionObservedHeight?: number;
+    sessionFetchedAt?: string;
+    sessionStale?: boolean;
+  }
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
   const serviceMap = new Map<string, ServiceStats>();
@@ -1891,9 +1926,17 @@ function buildDashboard(
     earliestSettlementTime: settlementTimes[0] ?? null,
     latestSettlementTime: settlementTimes.at(-1) ?? null,
     totalRelays,
+    totalEstimatedRelays: totalRelays,
+    totalEstimatedComputeUnits: 0,
+    relayCoverage: 0,
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
+    suppliersPerSession: sessionData?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS,
+    appsStakedByService: sessionData?.appsStakedByService ?? {},
+    sessionObservedHeight: sessionData?.sessionObservedHeight ?? 0,
+    sessionFetchedAt: sessionData?.sessionFetchedAt ?? "",
+    sessionStale: sessionData?.sessionStale ?? true,
     providers,
     services
   };
@@ -2165,6 +2208,22 @@ async function refreshDashboard(window: TimeWindow): Promise<DashboardData> {
       });
       return persistDashboard(window, dashboard);
     } catch (poktscanError) {
+      if (!LEGACY_RPC_FALLBACK_ENABLED) {
+        logDataError("Poktscan dashboard refresh failed; legacy RPC fallback is disabled", poktscanError, { window });
+        if (stale) {
+          logDataWarning("Serving stale dashboard snapshot after Poktscan refresh failure", {
+            window,
+            dataSource: stale.dataSource,
+            latestHeight: stale.latestHeight,
+            indexerProcessedHeight: stale.indexerProcessedHeight ?? null,
+            indexerTargetHeight: stale.indexerTargetHeight ?? null
+          });
+          return stale;
+        }
+
+        throw new Error("Unable to refresh dashboard: Poktscan failed and legacy RPC fallback is disabled");
+      }
+
       logDataError("Poktscan dashboard refresh failed; trying RPC fallback", poktscanError, { window });
       try {
         const dashboard = await loadDashboardFromRpc(window);
@@ -2225,7 +2284,12 @@ export async function getDashboardData(window: TimeWindow): Promise<DashboardDat
 }
 
 export function getNetworkDailyHistoryLocal(days = PROVIDER_HISTORY_DAYS): NetworkDailyHistoryPoint[] {
-  return getNetworkDailyHistorySnapshot(days);
+  const snapshot = getNetworkDailyHistorySnapshot(days);
+  if (snapshot.length > 0 || !isDevelopmentDummyDataEnabled()) {
+    return snapshot;
+  }
+
+  return getDevelopmentNetworkDailyHistory(days);
 }
 
 export function getProviderDailyHistoryLocal(providerKey: string, days = PROVIDER_HISTORY_DAYS): ProviderDailyHistoryPoint[] {
@@ -2237,7 +2301,12 @@ export function getProviderSupplierBreakdownLocal(providerKey: string, window: T
 }
 
 export function getServiceDailyHistoryLocal(serviceId: string, days = PROVIDER_HISTORY_DAYS): ServiceDailyHistoryPoint[] {
-  return getServiceDailyHistorySnapshot(serviceId, days);
+  const snapshot = getServiceDailyHistorySnapshot(serviceId, days);
+  if (snapshot.length > 0 || !isDevelopmentDummyDataEnabled()) {
+    return snapshot;
+  }
+
+  return getDevelopmentServiceDailyHistory(serviceId, days);
 }
 
 export const getProviderDailyHistory = cache(async (providerKey: string, days = PROVIDER_HISTORY_DAYS): Promise<ProviderDailyHistoryPoint[]> => {
@@ -2551,7 +2620,7 @@ export const getServiceDailyHistory = cache(async (serviceId: string, days = PRO
 });
 
 export function getDashboardSnapshot(window: TimeWindow): DashboardData | null {
-  return getCachedDashboardSnapshot(window);
+  return getCachedDashboardSnapshot(window) ?? (isDevelopmentDummyDataEnabled() ? getDevelopmentDashboardData(window) : null);
 }
 
 export function getDashboardDataSafe(window: TimeWindow): { data: DashboardData | null; status: "ready" | "warming" } {
@@ -2559,6 +2628,10 @@ export function getDashboardDataSafe(window: TimeWindow): { data: DashboardData 
 
   if (snapshot) {
     return { data: snapshot, status: "ready" };
+  }
+
+  if (isDevelopmentDummyDataEnabled()) {
+    return { data: getDevelopmentDashboardData(window), status: "ready" };
   }
 
   logDataWarning("Dashboard snapshot missing; waiting for ingestion worker", { window });
@@ -2578,7 +2651,7 @@ export async function runDataIngestion(): Promise<void> {
   try {
     logDataInfo("Starting data ingestion worker run");
 
-    const windows: TimeWindow[] = ["30d", "7d", "24h"];
+    const windows: TimeWindow[] = ["30d", "7d", "24h", "365d"];
     const dashboards: Partial<Record<TimeWindow, DashboardData>> = {};
     for (const window of windows) {
       dashboards[window] = await refreshDashboard(window);

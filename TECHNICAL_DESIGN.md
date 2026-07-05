@@ -2,27 +2,39 @@
 
 ## Stato Attuale della Codebase
 
-La codebase attuale ha gia una demo pubblica funzionante, ma non implementa ancora alla lettera tutta l'architettura RC1 descritta in questo documento.
+La codebase attuale ha gia una demo pubblica funzionante. Dopo il feedback PNF, il branch `main` e esplicitamente limitato a una superficie pubblica neutrale: non deve nominare, classificare o linkare provider commerciali.
+
+Il branch `provider` conserva la precedente edizione operator/provider intelligence, inclusi ranking e dettagli per-provider, per analisi privata.
 
 In particolare oggi:
 
-- l'applicazione e una singola app Next.js, non un sistema separato `worker + db analitico + api`
+- l'applicazione e una app Next.js servita separatamente da un indexer Node.js persistente
+- l'indexer segue i nuovi blocchi via WebSocket CometBFT e usa HTTP RPC per recuperare `/block_results` e colmare gap
 - la dashboard tenta prima di leggere aggregati da `Poktscan`
 - se `Poktscan` non e disponibile, usa un fallback RPC che legge `EventClaimSettled` dagli `end_block_events`
 - la persistenza locale e un SQLite leggero usato per cache di settlement block, metadata e snapshot della dashboard
-- la UI pubblica raggruppa i supplier soprattutto a livello di provider domain, derivato da domini/endpoints del supplier, non solo per `supplier_operator_address`
+- il modello interno raggruppa i supplier anche a livello di provider domain, ma `main` rimuove nomi, chiavi, dettaglio supplier e mix per-provider dal payload pubblico
 
 Quindi questo documento va letto come direzione architetturale per l'evoluzione verso una RC1 piu rigorosa, non come descrizione perfettamente aderente di ogni dettaglio implementato oggi.
 
 ## Scopo
 
-Questo documento definisce come costruire la prima versione utile di una dashboard Pocket Network per nuovi provider, con focus economico.
+Questo documento definisce come costruire la prima versione utile di una dashboard Pocket Network per nuovi provider, con focus economico e neutralita PNF nella superficie pubblica.
 
 Metriche RC1:
 
-- relay eseguiti per chain per provider
-- revenue per provider
+- relay e revenue per service
+- metriche aggregate non nominali sui provider/domain
 - filtri temporali `24h`, `7d`, `30d`
+
+Fuori scope per `main`:
+
+- named provider leaderboards
+- provider detail pages
+- staker provider rankings
+- per-provider service mix, supplier counts, supplier addresses, or operational playbooks
+
+Queste viste possono vivere nel branch `provider`, non nella dashboard pubblica principale.
 
 Il documento e pensato per un agente o sviluppatore senza contesto precedente. Per questo include riferimenti diretti ai file di `poktroll` da cui derivano le decisioni architetturali.
 
@@ -95,6 +107,7 @@ Servono quindi:
 - indicizzazione degli eventi
 - persistenza locale
 - aggregazioni applicative
+- materializzazione aggressiva delle cache JSON consumate dalla UI
 
 ### L'evento corretto e `EventClaimSettled`
 
@@ -129,7 +142,30 @@ Conseguenza pratica:
 - l'indicizzazione non deve basarsi solo su tx search o sugli eventi delle tx utente
 - il worker deve leggere i `block_results` e gli `end_block_events` blocco per blocco
 
-Questo e il punto implementativo piu importante dell'intero progetto.
+Questo e il punto implementativo piu importante dell'intero progetto. Nel branch `main`, l'indexer salva solo facts compatti e identita hashate; i payload pubblici non includono nomi, domini, indirizzi o mix operativi per-provider.
+
+## Indexer Runtime Corrente
+
+Il processo `npm run indexer`:
+
+- apre subito il WebSocket live, senza attendere backfill o repair storici
+- sincronizza la dimensione `service_dim` via REST in background durante lo startup live
+- legge il checkpoint `indexer_state.last_processed_height`
+- recupera piccoli gap live via HTTP RPC con catchup bounded e best-effort
+- sottoscrive `tm.event='NewBlock'` via WebSocket
+- processa ogni height in modo idempotente
+- registra coverage per height in `indexed_heights`, con stato `indexed`, `empty` o `failed`
+- usa backfill concorrente newest-first per comandi manuali/debug, dando priorita ai blocchi recenti
+- ritenta le chiamate RPC fallite su tutto il pool, con backoff configurabile
+- ritenta anche a livello di height, così un timeout su `/block_results` o `/block` non interrompe il range
+- espone nei log del backfill successi, fallimenti, timeout e latenza media per nodo RPC
+- in live mode evita catchup enormi da checkpoint obsoleti e riparte dal tip quando il gap supera la soglia configurata
+- in produzione esegue live WebSocket e repair loop in parallelo: il repair trova buchi negli ultimi 45 giorni newest-first e li riempie autonomamente senza bloccare la sync dell'altezza corrente
+- rigenera le cache una sola volta a fine catchup/backfill, evitando rebuild costosi ogni pochi blocchi
+- scrive `settlement_facts` con retention predefinita di 45 giorni
+- rigenera cache UI per `24h`, `7d`, `30d` e history principali
+
+Il vecchio `npm run worker` resta fallback legacy finche il nuovo indexer non e completamente validato in produzione.
 
 ## Origine dei Numeri Economici
 

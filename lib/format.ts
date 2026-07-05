@@ -53,6 +53,8 @@ export function formatRelativeRange(window: string): string {
       return "last 7 days";
     case "30d":
       return "last 30 days";
+    case "365d":
+      return "last 365 days";
     default:
       return window;
   }

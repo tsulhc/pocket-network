@@ -1,5 +1,5 @@
 import DashboardView from "@/app/dashboard-view";
-import { serializeDashboardData } from "@/lib/dashboard-serialization";
+import { serializePublicDashboardData } from "@/lib/dashboard-serialization";
 import { getDashboardDataSafe, getDashboardSnapshot, getNetworkDailyHistoryLocal, primeDashboardRefresh } from "@/lib/pocket";
 import type { SerializedDashboardData, SerializedNetworkDailyHistoryPoint, TimeWindow } from "@/lib/types";
 
@@ -23,13 +23,13 @@ export default async function Home({ searchParams }: PageProps) {
   const initialWindow = isWindow(resolvedSearchParams.window) ? resolvedSearchParams.window : "30d";
 
   const initialResult = getDashboardDataSafe(initialWindow);
-  const initialData = initialResult.data ? serializeDashboardData(initialResult.data) : null;
+  const initialData = initialResult.data ? serializePublicDashboardData(initialResult.data) : null;
   const otherEntries = WINDOWS.filter((window) => window !== initialWindow).map((window) => {
     const snapshot = getDashboardSnapshot(window);
     if (snapshot) {
       primeDashboardRefresh(window);
     }
-    return [window, snapshot ? serializeDashboardData(snapshot) : null] as const;
+    return [window, snapshot ? serializePublicDashboardData(snapshot) : null] as const;
   });
   const dataByWindow = Object.fromEntries([
     [initialWindow, initialData] as const,

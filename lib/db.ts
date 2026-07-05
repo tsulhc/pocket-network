@@ -19,6 +19,9 @@ export type IndexedSettlementFact = {
   supplierHash: string;
   ownerHash: string | null;
   relays: number;
+  estimatedRelays?: number;
+  claimedComputeUnits?: number;
+  estimatedComputeUnits?: number;
   revenueUpokt: string;
 };
 
@@ -32,20 +35,6 @@ export type IndexedSupplierDomain = {
   supplierHash: string;
   domainHash: string;
   hasEndpoint: boolean;
-};
-
-export type IndexedSupplierIdentity = {
-  supplierHash: string;
-  operatorAddress: string;
-  ownerAddress: string;
-  providerKey: string;
-  providerLabel: string;
-  providerDomain: string;
-  stakeUpokt: string | null;
-  serviceCount: number | null;
-  operatorRevSharePercent: number | null;
-  ownerRevSharePercent: number | null;
-  otherRevSharePercent: number | null;
 };
 
 export type IndexedHeightStatus = "indexed" | "empty" | "failed";
@@ -64,48 +53,27 @@ export type IndexedServiceAggregate = {
   service_name: string | null;
   compute_units_per_relay: number | null;
   relays: number;
+  estimated_relays: number;
+  estimated_compute_units: number;
+  relay_coverage: number;
   revenue_upokt: string;
   supplier_count: number;
   provider_count: number;
 };
 
 export type IndexedProviderAggregate = {
-  provider_key: string;
-  provider_label: string | null;
-  provider_domain: string | null;
+  supplier_hash: string;
   relays: number;
   revenue_upokt: string;
   service_count: number;
-  supplier_count: number;
-};
-
-export type IndexedProviderServiceAggregate = {
-  provider_key: string;
-  service_id: string;
-  service_name: string | null;
-  compute_units_per_relay: number | null;
-  relays: number;
-  revenue_upokt: string;
-};
-
-export type IndexedProviderSupplierAggregate = {
-  provider_key: string;
-  operator_address: string;
-  owner_address: string;
-  provider_domain: string | null;
-  relays: number;
-  revenue_upokt: string;
-  service_count: number;
-  stake_upokt: string | null;
-  supplier_service_count: number | null;
-  operator_rev_share_percent: number | null;
-  owner_rev_share_percent: number | null;
-  other_rev_share_percent: number | null;
 };
 
 export type IndexedDailyAggregate = {
   day: string;
   relays: number;
+  estimated_relays: number;
+  estimated_compute_units: number;
+  relay_coverage: number;
   revenue_upokt: string;
 };
 
@@ -170,21 +138,6 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS supplier_identity_dim (
-    supplier_hash TEXT PRIMARY KEY,
-    operator_address TEXT NOT NULL,
-    owner_address TEXT NOT NULL,
-    provider_key TEXT NOT NULL,
-    provider_label TEXT NOT NULL,
-    provider_domain TEXT NOT NULL,
-    stake_upokt TEXT,
-    service_count INTEGER,
-    operator_rev_share_percent REAL,
-    owner_rev_share_percent REAL,
-    other_rev_share_percent REAL,
-    updated_at TEXT NOT NULL
-  );
-
   CREATE TABLE IF NOT EXISTS settlement_facts (
     height INTEGER NOT NULL,
     event_index INTEGER NOT NULL,
@@ -195,6 +148,9 @@ db.exec(`
     supplier_hash TEXT NOT NULL,
     owner_hash TEXT,
     relays INTEGER NOT NULL,
+    estimated_relays INTEGER,
+    claimed_compute_units INTEGER,
+    estimated_compute_units INTEGER,
     revenue_upokt TEXT NOT NULL,
     PRIMARY KEY (height, event_index)
   );
@@ -208,14 +164,33 @@ db.exec(`
     last_error TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS daily_rollups (
+    day TEXT PRIMARY KEY,
+    total_relays INTEGER NOT NULL,
+    estimated_relays INTEGER,
+    estimated_compute_units INTEGER,
+    revenue_upokt TEXT NOT NULL,
+    relay_coverage REAL NOT NULL DEFAULT 0,
+    generated_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS settlement_facts_time_idx ON settlement_facts(block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_service_time_idx ON settlement_facts(service_id, block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_day_idx ON settlement_facts(day);
   CREATE INDEX IF NOT EXISTS settlement_facts_supplier_time_idx ON settlement_facts(supplier_hash, block_time);
   CREATE INDEX IF NOT EXISTS supplier_domain_dim_domain_idx ON supplier_domain_dim(domain_hash);
-  CREATE INDEX IF NOT EXISTS supplier_identity_provider_idx ON supplier_identity_dim(provider_key);
   CREATE INDEX IF NOT EXISTS indexed_heights_status_idx ON indexed_heights(status, height);
 `);
+
+for (const col of ["estimated_relays", "claimed_compute_units", "estimated_compute_units"]) {
+  try { db.exec(`ALTER TABLE settlement_facts ADD COLUMN ${col} INTEGER`); } catch { /* column already exists */ }
+}
+
+const settlementFactsColumns = db.prepare("PRAGMA table_info(settlement_facts)").all() as Array<{ name: string }>;
+const hasLegacyColumn = (col: string) => settlementFactsColumns.some((c) => c.name === col);
+if (!hasLegacyColumn("relays")) {
+  try { db.exec("ALTER TABLE settlement_facts ADD COLUMN relays INTEGER"); } catch { /* fallback */ }
+}
 
 const selectSettlementBlocksStatement = db.prepare(
   `SELECT height, block_time, events_json FROM settlement_blocks WHERE height IN (${Array.from({ length: 999 }, () => "?").join(",")})`
@@ -311,53 +286,9 @@ const upsertSupplierDomainStatement = db.prepare(
   `
 );
 
-const upsertSupplierIdentityStatement = db.prepare(
-  `
-    INSERT INTO supplier_identity_dim (
-      supplier_hash,
-      operator_address,
-      owner_address,
-      provider_key,
-      provider_label,
-      provider_domain,
-      stake_upokt,
-      service_count,
-      operator_rev_share_percent,
-      owner_rev_share_percent,
-      other_rev_share_percent,
-      updated_at
-    ) VALUES (
-      @supplier_hash,
-      @operator_address,
-      @owner_address,
-      @provider_key,
-      @provider_label,
-      @provider_domain,
-      @stake_upokt,
-      @service_count,
-      @operator_rev_share_percent,
-      @owner_rev_share_percent,
-      @other_rev_share_percent,
-      @updated_at
-    )
-    ON CONFLICT(supplier_hash) DO UPDATE SET
-      operator_address = excluded.operator_address,
-      owner_address = excluded.owner_address,
-      provider_key = excluded.provider_key,
-      provider_label = excluded.provider_label,
-      provider_domain = excluded.provider_domain,
-      stake_upokt = excluded.stake_upokt,
-      service_count = excluded.service_count,
-      operator_rev_share_percent = excluded.operator_rev_share_percent,
-      owner_rev_share_percent = excluded.owner_rev_share_percent,
-      other_rev_share_percent = excluded.other_rev_share_percent,
-      updated_at = excluded.updated_at
-  `
-);
-
 const insertSettlementFactStatement = db.prepare(
   `
-    INSERT OR IGNORE INTO settlement_facts (
+    INSERT INTO settlement_facts (
       height,
       event_index,
       block_time,
@@ -367,6 +298,9 @@ const insertSettlementFactStatement = db.prepare(
       supplier_hash,
       owner_hash,
       relays,
+      estimated_relays,
+      claimed_compute_units,
+      estimated_compute_units,
       revenue_upokt
     ) VALUES (
       @height,
@@ -378,8 +312,15 @@ const insertSettlementFactStatement = db.prepare(
       @supplier_hash,
       @owner_hash,
       @relays,
+      @estimated_relays,
+      @claimed_compute_units,
+      @estimated_compute_units,
       @revenue_upokt
     )
+    ON CONFLICT(height, event_index) DO UPDATE SET
+      estimated_relays = COALESCE(excluded.estimated_relays, settlement_facts.estimated_relays),
+      claimed_compute_units = COALESCE(excluded.claimed_compute_units, settlement_facts.claimed_compute_units),
+      estimated_compute_units = COALESCE(excluded.estimated_compute_units, settlement_facts.estimated_compute_units)
   `
 );
 
@@ -430,13 +371,15 @@ const selectServiceAggregatesStatement = db.prepare(
       service_dim.service_name,
       service_dim.compute_units_per_relay,
       SUM(facts.relays) AS relays,
+      CAST(COALESCE(SUM(facts.estimated_relays), 0) AS INTEGER) AS estimated_relays,
+      CAST(COALESCE(SUM(facts.estimated_compute_units), 0) AS INTEGER) AS estimated_compute_units,
+      CAST(COALESCE(SUM(CASE WHEN facts.estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS relay_coverage,
       CAST(SUM(CAST(facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
       COUNT(DISTINCT facts.supplier_hash) AS supplier_count,
-      COUNT(DISTINCT COALESCE(supplier_identity_dim.provider_key, supplier_domain_dim.domain_hash, facts.owner_hash, facts.supplier_hash)) AS provider_count
+      COUNT(DISTINCT COALESCE(supplier_domain_dim.domain_hash, facts.owner_hash, facts.supplier_hash)) AS provider_count
     FROM settlement_facts facts
     LEFT JOIN service_dim ON service_dim.service_id = facts.service_id
     LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = facts.supplier_hash
-    LEFT JOIN supplier_identity_dim ON supplier_identity_dim.supplier_hash = facts.supplier_hash
     WHERE facts.block_time >= ?
     GROUP BY facts.service_id
     HAVING relays > 0 OR CAST(revenue_upokt AS INTEGER) > 0
@@ -447,79 +390,16 @@ const selectServiceAggregatesStatement = db.prepare(
 const selectProviderAggregatesStatement = db.prepare(
   `
     SELECT
-      COALESCE(supplier_identity_dim.provider_key, supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash) AS provider_key,
-      supplier_identity_dim.provider_label,
-      supplier_identity_dim.provider_domain,
+      COALESCE(supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash) AS supplier_hash,
       SUM(settlement_facts.relays) AS relays,
       CAST(SUM(CAST(settlement_facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
-      COUNT(DISTINCT settlement_facts.service_id) AS service_count,
-      COUNT(DISTINCT settlement_facts.supplier_hash) AS supplier_count
+      COUNT(DISTINCT settlement_facts.service_id) AS service_count
     FROM settlement_facts
     LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = settlement_facts.supplier_hash
-    LEFT JOIN supplier_identity_dim ON supplier_identity_dim.supplier_hash = settlement_facts.supplier_hash
     WHERE settlement_facts.block_time >= ?
-    GROUP BY COALESCE(supplier_identity_dim.provider_key, supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash)
+    GROUP BY COALESCE(supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash)
     HAVING relays > 0 OR CAST(revenue_upokt AS INTEGER) > 0
     ORDER BY CAST(revenue_upokt AS INTEGER) DESC, relays DESC
-  `
-);
-
-const selectProviderServiceAggregatesStatement = db.prepare(
-  `
-    SELECT
-      COALESCE(supplier_identity_dim.provider_key, supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash) AS provider_key,
-      settlement_facts.service_id,
-      service_dim.service_name,
-      service_dim.compute_units_per_relay,
-      SUM(settlement_facts.relays) AS relays,
-      CAST(SUM(CAST(settlement_facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt
-    FROM settlement_facts
-    LEFT JOIN service_dim ON service_dim.service_id = settlement_facts.service_id
-    LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = settlement_facts.supplier_hash
-    LEFT JOIN supplier_identity_dim ON supplier_identity_dim.supplier_hash = settlement_facts.supplier_hash
-    WHERE settlement_facts.block_time >= ?
-    GROUP BY provider_key, settlement_facts.service_id
-    ORDER BY provider_key ASC, CAST(revenue_upokt AS INTEGER) DESC, relays DESC
-  `
-);
-
-const selectProviderSupplierAggregatesStatement = db.prepare(
-  `
-    SELECT
-      COALESCE(supplier_identity_dim.provider_key, supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash) AS provider_key,
-      COALESCE(supplier_identity_dim.operator_address, settlement_facts.supplier_hash) AS operator_address,
-      COALESCE(supplier_identity_dim.owner_address, settlement_facts.owner_hash, settlement_facts.supplier_hash) AS owner_address,
-      supplier_identity_dim.provider_domain,
-      SUM(settlement_facts.relays) AS relays,
-      CAST(SUM(CAST(settlement_facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt,
-      COUNT(DISTINCT settlement_facts.service_id) AS service_count,
-      supplier_identity_dim.stake_upokt,
-      supplier_identity_dim.service_count AS supplier_service_count,
-      supplier_identity_dim.operator_rev_share_percent,
-      supplier_identity_dim.owner_rev_share_percent,
-      supplier_identity_dim.other_rev_share_percent
-    FROM settlement_facts
-    LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = settlement_facts.supplier_hash
-    LEFT JOIN supplier_identity_dim ON supplier_identity_dim.supplier_hash = settlement_facts.supplier_hash
-    WHERE settlement_facts.block_time >= ?
-    GROUP BY provider_key, settlement_facts.supplier_hash
-    ORDER BY provider_key ASC, CAST(revenue_upokt AS INTEGER) DESC, relays DESC
-  `
-);
-
-const selectProviderDailyAggregatesStatement = db.prepare(
-  `
-    SELECT
-      settlement_facts.day,
-      SUM(settlement_facts.relays) AS relays,
-      CAST(SUM(CAST(settlement_facts.revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt
-    FROM settlement_facts
-    LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = settlement_facts.supplier_hash
-    LEFT JOIN supplier_identity_dim ON supplier_identity_dim.supplier_hash = settlement_facts.supplier_hash
-    WHERE settlement_facts.block_time >= ?
-      AND COALESCE(supplier_identity_dim.provider_key, supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash) = ?
-    GROUP BY settlement_facts.day
-    ORDER BY settlement_facts.day ASC
   `
 );
 
@@ -528,6 +408,9 @@ const selectDailyAggregatesStatement = db.prepare(
     SELECT
       day,
       SUM(relays) AS relays,
+      CAST(COALESCE(SUM(estimated_relays), 0) AS INTEGER) AS estimated_relays,
+      CAST(COALESCE(SUM(estimated_compute_units), 0) AS INTEGER) AS estimated_compute_units,
+      CAST(COALESCE(SUM(CASE WHEN estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS relay_coverage,
       CAST(SUM(CAST(revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt
     FROM settlement_facts
     WHERE block_time >= ?
@@ -536,11 +419,22 @@ const selectDailyAggregatesStatement = db.prepare(
   `
 );
 
+const selectGlobalRelayCoverageStatement = db.prepare(
+  `
+    SELECT CAST(COALESCE(SUM(CASE WHEN estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS coverage
+    FROM settlement_facts
+    WHERE block_time >= ?
+  `
+);
+
 const selectServiceDailyAggregatesStatement = db.prepare(
   `
     SELECT
       day,
       SUM(relays) AS relays,
+      CAST(COALESCE(SUM(estimated_relays), 0) AS INTEGER) AS estimated_relays,
+      CAST(COALESCE(SUM(estimated_compute_units), 0) AS INTEGER) AS estimated_compute_units,
+      CAST(COALESCE(SUM(CASE WHEN estimated_relays IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS relay_coverage,
       CAST(SUM(CAST(revenue_upokt AS INTEGER)) AS TEXT) AS revenue_upokt
     FROM settlement_facts
     WHERE block_time >= ? AND service_id = ?
@@ -551,6 +445,29 @@ const selectServiceDailyAggregatesStatement = db.prepare(
 
 const selectLatestIndexedFactStatement = db.prepare(
   "SELECT height, block_time FROM settlement_facts ORDER BY height DESC LIMIT 1"
+);
+
+const upsertDailyRollupStatement = db.prepare(
+  `
+    INSERT INTO daily_rollups (day, total_relays, estimated_relays, estimated_compute_units, revenue_upokt, relay_coverage, generated_at)
+    VALUES (@day, @total_relays, @estimated_relays, @estimated_compute_units, @revenue_upokt, @relay_coverage, @generated_at)
+    ON CONFLICT(day) DO UPDATE SET
+      total_relays = excluded.total_relays,
+      estimated_relays = excluded.estimated_relays,
+      estimated_compute_units = excluded.estimated_compute_units,
+      revenue_upokt = excluded.revenue_upokt,
+      relay_coverage = excluded.relay_coverage,
+      generated_at = excluded.generated_at
+  `
+);
+
+const selectDailyRollupsStatement = db.prepare(
+  `
+    SELECT day, total_relays AS relays, estimated_relays, estimated_compute_units, revenue_upokt, relay_coverage
+    FROM daily_rollups
+    WHERE day >= ?
+    ORDER BY day ASC
+  `
 );
 
 const writeIndexedBlockTransaction = db.transaction((height: number, facts: IndexedSettlementFact[]) => {
@@ -565,6 +482,9 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
       supplier_hash: fact.supplierHash,
       owner_hash: fact.ownerHash,
       relays: fact.relays,
+      estimated_relays: fact.estimatedRelays ?? null,
+      claimed_compute_units: fact.claimedComputeUnits ?? null,
+      estimated_compute_units: fact.estimatedComputeUnits ?? null,
       revenue_upokt: fact.revenueUpokt
     });
   }
@@ -728,29 +648,6 @@ export function saveIndexedSupplierDomains(domains: IndexedSupplierDomain[]): vo
   transaction(domains);
 }
 
-export function saveIndexedSupplierIdentities(identities: IndexedSupplierIdentity[]): void {
-  const now = new Date().toISOString();
-  const transaction = db.transaction((entries: IndexedSupplierIdentity[]) => {
-    for (const entry of entries) {
-      upsertSupplierIdentityStatement.run({
-        supplier_hash: entry.supplierHash,
-        operator_address: entry.operatorAddress,
-        owner_address: entry.ownerAddress,
-        provider_key: entry.providerKey,
-        provider_label: entry.providerLabel,
-        provider_domain: entry.providerDomain,
-        stake_upokt: entry.stakeUpokt,
-        service_count: entry.serviceCount,
-        operator_rev_share_percent: entry.operatorRevSharePercent,
-        owner_rev_share_percent: entry.ownerRevSharePercent,
-        other_rev_share_percent: entry.otherRevSharePercent,
-        updated_at: now
-      });
-    }
-  });
-  transaction(identities);
-}
-
 export function getIndexedServiceAggregates(sinceUnixMs: number): IndexedServiceAggregate[] {
   return selectServiceAggregatesStatement.all(sinceUnixMs) as IndexedServiceAggregate[];
 }
@@ -759,29 +656,38 @@ export function getIndexedProviderAggregates(sinceUnixMs: number): IndexedProvid
   return selectProviderAggregatesStatement.all(sinceUnixMs) as IndexedProviderAggregate[];
 }
 
-export function getIndexedProviderServiceAggregates(sinceUnixMs: number): IndexedProviderServiceAggregate[] {
-  return selectProviderServiceAggregatesStatement.all(sinceUnixMs) as IndexedProviderServiceAggregate[];
-}
-
-export function getIndexedProviderSupplierAggregates(sinceUnixMs: number): IndexedProviderSupplierAggregate[] {
-  return selectProviderSupplierAggregatesStatement.all(sinceUnixMs) as IndexedProviderSupplierAggregate[];
-}
-
 export function getIndexedDailyAggregates(sinceUnixMs: number): IndexedDailyAggregate[] {
   return selectDailyAggregatesStatement.all(sinceUnixMs) as IndexedDailyAggregate[];
+}
+
+export function getGlobalRelayCoverage(sinceUnixMs: number): number {
+  const row = selectGlobalRelayCoverageStatement.get(sinceUnixMs) as { coverage: number } | undefined;
+  return row?.coverage ?? 0;
 }
 
 export function getIndexedServiceDailyAggregates(sinceUnixMs: number, serviceId: string): IndexedDailyAggregate[] {
   return selectServiceDailyAggregatesStatement.all(sinceUnixMs, serviceId) as IndexedDailyAggregate[];
 }
 
-export function getIndexedProviderDailyAggregates(sinceUnixMs: number, providerKey: string): IndexedDailyAggregate[] {
-  return selectProviderDailyAggregatesStatement.all(sinceUnixMs, providerKey) as IndexedDailyAggregate[];
-}
-
 export function getLatestIndexedFact(): { height: number; block_time: number } | null {
   const row = selectLatestIndexedFactStatement.get() as { height: number; block_time: number } | undefined;
   return row ?? null;
+}
+
+export function upsertDailyRollup(rollup: IndexedDailyAggregate & { generated_at: string }): void {
+  upsertDailyRollupStatement.run({
+    day: rollup.day,
+    total_relays: rollup.relays,
+    estimated_relays: rollup.estimated_relays,
+    estimated_compute_units: rollup.estimated_compute_units,
+    revenue_upokt: rollup.revenue_upokt,
+    relay_coverage: rollup.relay_coverage,
+    generated_at: rollup.generated_at
+  });
+}
+
+export function getDailyRollups(sinceDay: string): IndexedDailyAggregate[] {
+  return selectDailyRollupsStatement.all(sinceDay) as IndexedDailyAggregate[];
 }
 
 export function pruneIndexerData(retentionDays: number, maxJobRuns = 500): void {

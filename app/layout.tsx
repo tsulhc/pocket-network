@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Kumbh_Sans } from "next/font/google";
 
 import "@/app/globals.css";
+import SiteFooter from "@/app/site-footer";
 import SiteNav from "@/app/site-nav";
 
 const kumbhSans = Kumbh_Sans({
@@ -11,8 +12,8 @@ const kumbhSans = Kumbh_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Pocket Network Provider Dashboard",
-  description: "Public provider-side revenue and relay intelligence for Pocket Network."
+  title: "Pocket Network Analytics",
+  description: "Public service demand, relay, reward, and network coverage analytics for Pocket Network."
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -21,6 +22,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         <SiteNav />
         {children}
+        <SiteFooter />
       </body>
     </html>
   );

@@ -1,4 +1,4 @@
-export type TimeWindow = "24h" | "7d" | "30d";
+export type TimeWindow = "24h" | "7d" | "30d" | "365d";
 
 export type ProviderChainStats = {
   serviceId: string;
@@ -40,9 +40,12 @@ export type ServiceStats = {
   serviceId: string;
   serviceName: string;
   relays: number;
+  estimatedRelays?: number;
   computeUnits?: number;
   computeUnitsPerRelay?: number;
+  estimatedComputeUnits?: number;
   supplierCount?: number;
+  appsStaked?: number;
   revenueUpokt: bigint;
   providerCount: number;
 };
@@ -61,9 +64,18 @@ export type DashboardData = {
   earliestSettlementTime: string | null;
   latestSettlementTime: string | null;
   totalRelays: number;
+  totalEstimatedRelays: number;
+  totalEstimatedComputeUnits: number;
+  relayCoverage: number;
   totalRevenueUpokt: bigint;
   activeProviders: number;
   activeChains: number;
+  suppliersPerSession: number;
+  appsStakedByService: Record<string, number>;
+  /** Node's latest block height observed at session-snapshot time, NOT a pinned REST snapshot. */
+  sessionObservedHeight: number;
+  sessionFetchedAt: string;
+  sessionStale: boolean;
   providers: ProviderStats[];
   services: ServiceStats[];
 };
@@ -77,6 +89,11 @@ export type ProviderDailyHistoryPoint = {
 export type NetworkDailyHistoryPoint = {
   day: string;
   relays: number;
+  estimatedRelays?: number;
+  estimatedComputeUnits?: number;
+  /** True when the day's relays include estimated values, not just sampled/indexed facts. */
+  isEstimated?: boolean;
+  relayCoverage?: number;
   revenueUpokt: bigint;
 };
 
@@ -97,8 +114,9 @@ export type SerializedProviderStats = Omit<ProviderStats, "revenueUpokt" | "chai
   chains: SerializedProviderChainStats[];
 };
 
-export type SerializedServiceStats = Omit<ServiceStats, "revenueUpokt"> & {
+export type SerializedServiceStats = Omit<ServiceStats, "revenueUpokt" | "estimatedComputeUnits"> & {
   revenueUpokt: string;
+  estimatedComputeUnits?: number;
 };
 
 export type SerializedProviderDailyHistoryPoint = Omit<ProviderDailyHistoryPoint, "revenueUpokt"> & {

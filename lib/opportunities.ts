@@ -1,4 +1,12 @@
-import type { SerializedServiceStats } from "@/lib/types";
+type OpportunityService = {
+  serviceId: string;
+  serviceName: string;
+  supplierCount?: number;
+  providerCount: number;
+  relays: number;
+  computeUnits?: number;
+  revenueUpokt: string | bigint;
+};
 
 export const SESSION_SUPPLIER_SLOTS = 50;
 export const DEFAULT_NEW_PROVIDER_SUPPLIERS = 15;
@@ -13,12 +21,17 @@ export type ProviderServiceOpportunity = {
   opportunityScore: number;
   expectedSharePercent: number;
   selectionProbability: number;
-  projectedRevenueUpokt: bigint;
-  projectedRevenuePerSupplierUpokt: bigint;
+  equalShareRevenueEstimateUpokt: bigint;
+  equalShareRevenuePerSupplierUpokt: bigint;
+  modelledSessionProbability?: number;
+  modelledAnyApplicationProbability?: number;
+  expectedAssignments?: number;
+  expectedSessionsRepresented?: number;
+  appsStaked?: number;
 };
 
-function toBigInt(value: string): bigint {
-  return BigInt(value);
+function toBigInt(value: string | bigint): bigint {
+  return typeof value === "bigint" ? value : BigInt(value);
 }
 
 function toPoktNumber(value: bigint): number {
@@ -40,19 +53,67 @@ export function getMarginalRevenueGainUpokt(revenueUpokt: bigint, existingSuppli
 
 export function getSelectionProbability(existingSupplierCount: number, enteringSupplierCount: number, sessionSlots = SESSION_SUPPLIER_SLOTS): number {
   if (enteringSupplierCount <= 0) return 0;
-  const totalSuppliers = existingSupplierCount + enteringSupplierCount;
-  if (totalSuppliers <= 0) return 0;
-  if (sessionSlots >= totalSuppliers) return 100;
+  const E = Math.max(0, Math.round(existingSupplierCount));
+  const M = Math.max(0, Math.round(enteringSupplierCount));
+  const T = E + M;
+  if (T <= 0) return 0;
+  const slots = Math.round(sessionSlots);
+  if (slots <= 0) return 0;
+  const K = Math.min(slots, T);
 
-  let probabilityNoneSelected = 1;
-  for (let index = 0; index < sessionSlots; index += 1) {
-    probabilityNoneSelected *= (totalSuppliers - enteringSupplierCount - index) / (totalSuppliers - index);
-  }
+  const combination = (n: number, k: number): number => {
+    if (k < 0 || k > n) return 0;
+    if (k === 0 || k === n) return 1;
+    let result = 1;
+    for (let i = 0; i < k; i += 1) {
+      result *= (n - i) / (i + 1);
+    }
+    return result;
+  };
 
-  return Math.max(0, Math.min(100, (1 - probabilityNoneSelected) * 100));
+  const factT = combination(T, K);
+  if (factT <= 0) return 100;
+
+  const factE = K > E ? 0 : combination(E, K);
+  const pSession = Math.max(0, Math.min(100, (1 - factE / factT) * 100));
+
+  return pSession;
 }
 
-export function buildProviderServiceOpportunity(service: SerializedServiceStats, providerSupplierCount: number): ProviderServiceOpportunity {
+export function getModelledAnyApplicationProbability(
+  pSession: number,
+  appsStaked: number
+): number {
+  if (appsStaked <= 0) return 0;
+  return Math.max(0, Math.min(100, (1 - Math.pow(1 - pSession / 100, appsStaked)) * 100));
+}
+
+export function getExpectedAssignments(
+  appsStaked: number,
+  sessionSlots: number,
+  enteringSupplierCount: number,
+  totalSuppliers: number
+): number {
+  if (appsStaked <= 0 || enteringSupplierCount <= 0 || totalSuppliers <= 0) return 0;
+  const slots = Math.round(sessionSlots);
+  if (slots <= 0) return 0;
+  const K = Math.min(slots, Math.round(totalSuppliers));
+  return appsStaked * K * enteringSupplierCount / totalSuppliers;
+}
+
+export function getExpectedSessionsRepresented(
+  appsStaked: number,
+  pSession: number
+): number {
+  if (appsStaked <= 0) return 0;
+  return appsStaked * (pSession / 100);
+}
+
+export function buildProviderServiceOpportunity(
+  service: OpportunityService,
+  providerSupplierCount: number,
+  options?: { sessionSlots?: number; appsStaked?: number }
+): ProviderServiceOpportunity {
   const supplierCount = Math.max(service.supplierCount ?? 0, 0);
   const projectedRevenueUpokt = getProjectedRevenueUpokt(toBigInt(service.revenueUpokt), supplierCount, providerSupplierCount);
   const projectedRevenuePerSupplierUpokt = providerSupplierCount > 0
@@ -60,11 +121,12 @@ export function buildProviderServiceOpportunity(service: SerializedServiceStats,
     : 0n;
   const totalSuppliers = supplierCount + Math.max(providerSupplierCount, 0);
   const expectedSharePercent = totalSuppliers === 0 ? 0 : (providerSupplierCount / totalSuppliers) * 100;
-  const selectionProbability = getSelectionProbability(supplierCount, providerSupplierCount);
-  const projectedRevenuePerSupplierPokt = Number(projectedRevenuePerSupplierUpokt) / 1_000_000;
+  const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
+  const selectionProbability = getSelectionProbability(supplierCount, providerSupplierCount, sessionSlots);
+  const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
   const opportunityScore = projectedRevenuePerSupplierPokt * (0.65 + (selectionProbability / 100) * 0.35);
 
-  return {
+  const result: ProviderServiceOpportunity = {
     serviceId: service.serviceId,
     serviceName: service.serviceName,
     supplierCount,
@@ -74,13 +136,23 @@ export function buildProviderServiceOpportunity(service: SerializedServiceStats,
     opportunityScore,
     expectedSharePercent,
     selectionProbability,
-    projectedRevenueUpokt,
-    projectedRevenuePerSupplierUpokt
+    equalShareRevenueEstimateUpokt: projectedRevenueUpokt,
+    equalShareRevenuePerSupplierUpokt: projectedRevenuePerSupplierUpokt
   };
+
+  if (options?.appsStaked != null && options.appsStaked > 0) {
+    result.appsStaked = options.appsStaked;
+    result.modelledSessionProbability = selectionProbability;
+    result.modelledAnyApplicationProbability = getModelledAnyApplicationProbability(selectionProbability, options.appsStaked);
+    result.expectedAssignments = getExpectedAssignments(options.appsStaked, sessionSlots, providerSupplierCount, totalSuppliers);
+    result.expectedSessionsRepresented = getExpectedSessionsRepresented(options.appsStaked, selectionProbability);
+  }
+
+  return result;
 }
 
 export function allocateSuppliersByMarginalReturn(
-  services: SerializedServiceStats[],
+  services: OpportunityService[],
   supplierCount: number
 ): Map<string, number> {
   const allocation = new Map<string, number>();
@@ -93,7 +165,7 @@ export function allocateSuppliersByMarginalReturn(
   }
 
   for (let index = 0; index < supplierCount; index += 1) {
-    let bestService: SerializedServiceStats | null = null;
+    let bestService: OpportunityService | null = null;
     let bestGain = -1n;
 
     for (const service of services) {
@@ -116,11 +188,12 @@ export function allocateSuppliersByMarginalReturn(
 }
 
 export function buildAllocatedServiceOpportunity(
-  service: SerializedServiceStats,
+  service: OpportunityService,
   enteringSupplierCount: number,
-  allocatedSupplierCount: number
+  allocatedSupplierCount: number,
+  options?: { sessionSlots?: number; appsStaked?: number }
 ): ProviderServiceOpportunity {
-  const opportunity = buildProviderServiceOpportunity(service, enteringSupplierCount);
+  const opportunity = buildProviderServiceOpportunity(service, enteringSupplierCount, options);
   const projectedRevenueUpokt = getProjectedRevenueUpokt(
     toBigInt(service.revenueUpokt),
     Math.max(service.supplierCount ?? 0, 0),
@@ -130,16 +203,32 @@ export function buildAllocatedServiceOpportunity(
     ? projectedRevenueUpokt / BigInt(allocatedSupplierCount)
     : 0n;
   const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
-  const selectionProbability = getSelectionProbability(Math.max(service.supplierCount ?? 0, 0), allocatedSupplierCount);
+  const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
+  const selectionProbability = getSelectionProbability(Math.max(service.supplierCount ?? 0, 0), allocatedSupplierCount, sessionSlots);
 
-  return {
+  const result: ProviderServiceOpportunity = {
     ...opportunity,
     selectionProbability,
-    projectedRevenueUpokt,
-    projectedRevenuePerSupplierUpokt,
+    equalShareRevenueEstimateUpokt: projectedRevenueUpokt,
+    equalShareRevenuePerSupplierUpokt: projectedRevenuePerSupplierUpokt,
     expectedSharePercent: (Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount) === 0
       ? 0
       : (allocatedSupplierCount / (Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount)) * 100,
     opportunityScore: projectedRevenuePerSupplierPokt * (0.65 + (selectionProbability / 100) * 0.35)
   };
+
+  if (options?.appsStaked != null && options.appsStaked > 0) {
+    result.appsStaked = options.appsStaked;
+    result.modelledSessionProbability = selectionProbability;
+    result.modelledAnyApplicationProbability = getModelledAnyApplicationProbability(selectionProbability, options.appsStaked);
+    result.expectedAssignments = getExpectedAssignments(
+      options.appsStaked,
+      sessionSlots,
+      allocatedSupplierCount,
+      Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount
+    );
+    result.expectedSessionsRepresented = getExpectedSessionsRepresented(options.appsStaked, selectionProbability);
+  }
+
+  return result;
 }

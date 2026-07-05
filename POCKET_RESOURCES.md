@@ -1,6 +1,18 @@
 # Pocket Network Resources
 Common Resources in use on the Pocket Network Protocol
 
+## Repository Scope Note
+
+The `main` branch is the PNF-safe public dashboard scope. It should use these resources to produce service-level and aggregate market intelligence only, without named provider rankings or per-provider operational detail.
+
+The `provider` branch preserves the operator intelligence edition for private provider analysis.
+
+## Dashboard Indexer Runtime
+
+The public dashboard now prefers a local Pocket RPC indexer over third-party aggregate APIs. The indexer subscribes to CometBFT new blocks over WebSocket, reads block results over HTTP RPC, parses `pocket.tokenomics.EventClaimSettled`, and stores compact privacy-preserving facts in SQLite.
+
+RPC endpoints below may be supplied through `POCKET_RPC_URLS`; the indexer will fail over across the list when WebSocket or HTTP requests fail.
+
 ## Network Snapshots
 
 - Main snapshots dashboard: https://sync.easy2stake.com/d/ce1jmvhesy1hce/state-sync-server?var-chain_id=pocket

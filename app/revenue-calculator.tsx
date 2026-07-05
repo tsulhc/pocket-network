@@ -17,11 +17,16 @@ type CalculatorService = {
   revenueUpokt: string;
   providerCount: number;
   supplierCount?: number;
+  appsStaked?: number;
 };
 
 type RevenueCalculatorProps = {
   poktPriceUsd: number;
   services: CalculatorService[];
+  suppliersPerSession?: number;
+  sessionObservedHeight?: number;
+  sessionFetchedAt?: string;
+  sessionStale?: boolean;
 };
 
 const FREE_SUPPLIER_BUDGET = DEFAULT_NEW_PROVIDER_SUPPLIERS;
@@ -37,7 +42,8 @@ function toUsdFromUpokt(value: bigint, poktPriceUsd: number): number {
   return (Number(value) / 1_000_000) * poktPriceUsd;
 }
 
-export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCalculatorProps) {
+export default function RevenueCalculator({ poktPriceUsd, services, suppliersPerSession, sessionObservedHeight, sessionFetchedAt, sessionStale }: RevenueCalculatorProps) {
+  const liveSuppliersPerSession = suppliersPerSession ?? SESSION_SUPPLIER_SLOTS;
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
     services.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId)
   );
@@ -55,9 +61,9 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
   const selectedRevenueUpokt = selectedServices.reduce((sum, service) => sum + BigInt(service.revenueUpokt), 0n);
   const selectedRelays = selectedServices.reduce((sum, service) => sum + service.relays, 0);
   const serviceOpportunities = selectedServices.map((service) =>
-    buildAllocatedServiceOpportunity(service, supplierCount, supplierAllocation.get(service.serviceId) ?? 0)
+    buildAllocatedServiceOpportunity(service, supplierCount, supplierAllocation.get(service.serviceId) ?? 0, { sessionSlots: liveSuppliersPerSession, appsStaked: service.appsStaked })
   );
-  const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.projectedRevenueUpokt, 0n);
+  const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.equalShareRevenueEstimateUpokt, 0n);
   const selectedChainCount = selectedServices.length;
   const coveredChainCount = selectedServices.filter((service) => (supplierAllocation.get(service.serviceId) ?? 0) > 0).length;
   const foundationCoveredSuppliers = Math.min(supplierCount, FREE_SUPPLIER_BUDGET);
@@ -78,25 +84,25 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
   }
 
   return (
-    <section className="panel section calculator-section" style={{ position: 'relative', overflow: 'hidden' }}>
+    <section className="panel section calculator-section themed section-theme-revenue" style={{ position: 'relative', overflow: 'hidden' }}>
       <div style={{ 
         position: 'absolute', 
         bottom: '-10%', 
         left: '-5%', 
         width: '30%', 
         height: '40%', 
-        background: 'radial-gradient(circle, rgba(0, 133, 255, 0.03) 0%, transparent 70%)',
+        background: 'radial-gradient(circle, rgba(245, 200, 66, 0.03) 0%, transparent 70%)',
         pointerEvents: 'none'
       }} />
 
       <div className="section-title-row calculator-title-row">
         <div>
-          <h2 className="section-title">Project Your Growth</h2>
+          <h2 className="section-title">Growth Simulator</h2>
           <p className="section-subtitle">
-            Model your market entry with Foundation-backed incentives and real network demand.
+            Model your market entry with foundation support and real network demand.
           </p>
         </div>
-        <span className="pill">Growth Simulator</span>
+        <span className="pill">Onboarding</span>
       </div>
 
       <div className="calculator-layout">
@@ -104,15 +110,20 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
           <div className="calculator-assumption panel-inset" style={{ borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
             <div>
               <span className="hero-highlight-label">Foundation Support</span>
-             <strong style={{ display: 'block', margin: '8px 0', fontSize: '1.5rem', color: 'var(--accent)' }}>15 Subsidized Suppliers</strong>
+             <strong style={{ display: 'block', margin: '8px 0', fontSize: '1.5rem', color: 'var(--accent)' }}>15 Subsidized Units</strong>
               <p style={{ fontSize: '0.9rem' }}>
                 Pocket Network Foundation provides <strong>15 free suppliers</strong> to bootstrap new providers. 
-                Our model assumes <strong>{SESSION_SUPPLIER_SLOTS} slots</strong> per <strong>{formatInteger(SESSION_DURATION_MINUTES)}m session</strong>.
+                Our model assumes <strong>{liveSuppliersPerSession} slots</strong> per session.
+                {sessionStale && (
+                  <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
+                    Session parameters are stale; last-known snapshot{sessionFetchedAt ? ` from ${sessionFetchedAt}` : ""} is in use.
+                  </em>
+                )}
               </p>
             </div>
 
             <label className="calculator-input-group">
-              <span className="hero-highlight-label">Total Suppliers</span>
+              <span className="hero-highlight-label">Your Units</span>
               <input
                 type="number"
                 min={0}
@@ -126,9 +137,9 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
 
           <div className="calculator-kpis">
             <article className="calculator-kpi-card">
-              <span className="kpi-label">Market Revenue Pool</span>
+              <span className="kpi-label">Market Demand</span>
               <strong className="calculator-kpi-value accent-number">{formatUpokt(selectedRevenueUpokt, 1)}</strong>
-              <span className="kpi-foot">Aggregated demand in window</span>
+              <span className="kpi-foot">Total rewards in selected chains</span>
             </article>
 
             <article className="calculator-kpi-card calculator-kpi-card-accent" style={{ background: 'linear-gradient(135deg, rgba(0, 194, 255, 0.05) 0%, transparent 100%)', borderColor: 'var(--cyan-accent)' }}>
@@ -137,7 +148,7 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
                 {formatUpokt(projectedEntryUpokt, 1)}
               </strong>
               <span className="kpi-foot" style={{ color: 'var(--text)' }}>
-                Session-aware revenue estimate
+                Estimated daily revenue
               </span>
             </article>
           </div>
@@ -146,12 +157,12 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
             <div className="calculator-meta-card">
               <span className="hero-highlight-label">Target Footprint</span>
               <strong className="accent-number">{formatInteger(selectedChainCount)} chains</strong>
-              <p>{formatInteger(coveredChainCount)} chains covered by modeled traffic.</p>
+              <p>{formatInteger(coveredChainCount)} chains covered by your traffic.</p>
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Supplier Mix</span>
-              <strong className="accent-number">{formatInteger(supplierCount)} units</strong>
+              <span className="hero-highlight-label">Total Units</span>
+              <strong className="accent-number">{formatInteger(supplierCount)}</strong>
               <p>
                 {formatInteger(foundationCoveredSuppliers)} subsidized, {formatInteger(selfFundedSuppliers)} self-funded.
               </p>
@@ -164,21 +175,21 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Efficiency</span>
+              <span className="hero-highlight-label">Unit Efficiency</span>
               <strong className="accent-number" style={{ color: 'var(--green)' }}>{formatUpokt(entryPerSupplierUpokt, 1)}</strong>
-              <p>Projected revenue per active supplier.</p>
+              <p>Projected revenue per active unit.</p>
             </div>
 
             <div className="calculator-meta-card">
               <span className="hero-highlight-label">Selection Odds</span>
               <strong className="accent-number" style={{ color: 'var(--accent)' }}>{formatDecimal(averageSelectionProbability, 0)}%</strong>
-              <p>Average chance of landing at least one 30m session slot on covered chains.</p>
+              <p>Avg. chance of landing a session slot on covered chains.</p>
             </div>
           </div>
 
           <p className="footer-note" style={{ opacity: 0.8 }}>
-            <strong>Simulation Logic:</strong> Your suppliers are distributed across selected chains, prioritizing high-yield services. 
-            Competition is modeled against the real supplier count already active on each service, while the 15-supplier Foundation assumption remains specific to new-provider onboarding.
+            <strong>How it works:</strong> Units are distributed across selected chains to maximize yield. 
+            Competition is modeled against active suppliers on each service, while the 15-unit subsidy assumes new-provider onboarding.
           </p>
         </div>
 
@@ -186,13 +197,13 @@ export default function RevenueCalculator({ poktPriceUsd, services }: RevenueCal
           <div className="section-title-row compact-gap">
             <div>
               <h3 className="section-title" style={{ fontSize: '1.2rem' }}>Service Selection</h3>
-              <p className="section-subtitle" style={{ fontSize: '0.85rem' }}>Select chains to include in your deployment.</p>
+              <p className="section-subtitle" style={{ fontSize: '0.85rem' }}>Chains to include in your model.</p>
             </div>
           </div>
           
           <div className="calculator-actions" style={{ marginBottom: '20px' }}>
             <button type="button" className="btn btn-secondary" onClick={resetTopChains} style={{ fontSize: '12px' }}>
-              Top 10 Default
+              Reset Default
             </button>
             <button type="button" className="btn btn-primary" onClick={() => setSelectedIds(services.map((service) => service.serviceId))} style={{ fontSize: '12px' }}>
               Select All

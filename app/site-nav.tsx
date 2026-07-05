@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 
 const NAV_ITEMS = [
-// ... (icons remain the same)
   { 
     href: "/", 
     label: "Dashboard",
@@ -19,21 +18,25 @@ const NAV_ITEMS = [
     )
   },
   { 
-    href: "/providers", 
-    label: "Providers",
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      </svg>
-    )
-  },
-  { 
-    href: "/chains", 
-    label: "Chains",
+    href: "/service-demand", 
+    label: "Service Demand",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+      </svg>
+    )
+  },
+  {
+    href: "/chains",
+    label: "Chains",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M6 3v18" />
+        <path d="M18 3v18" />
+        <path d="M3 6h18" />
+        <path d="M3 12h18" />
+        <path d="M3 18h18" />
       </svg>
     )
   },
@@ -44,16 +47,6 @@ const NAV_ITEMS = [
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="12" cy="8" r="7" />
         <polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" />
-      </svg>
-    )
-  },
-  {
-    href: "/stakers",
-    label: "Stakers",
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2v20" />
-        <path d="M17 6.5c0-1.9-2.24-3.5-5-3.5s-5 1.6-5 3.5S9.24 10 12 10s5 1.6 5 3.5S14.76 17 12 17s-5-1.6-5-3.5" />
       </svg>
     )
   }
@@ -76,14 +69,14 @@ export default function SiteNav() {
   return (
     <header className={`site-header${isMenuOpen ? " menu-is-open" : ""}`}>
       <div className="site-header-main">
-        <Link href="/" className="site-brand" aria-label="Pocket Provider Dashboard home">
+        <Link href="/" className="site-brand" aria-label="Pocket Network dashboard home">
           <img 
             src="https://pocket.network/wp-content/uploads/2025/01/logo-white.png" 
             alt="Pocket Network Logo" 
             height="32"
             style={{ width: 'auto', display: 'block' }}
           />
-          <span style={{ marginLeft: '4px' }}>Providers</span>
+          <span style={{ marginLeft: '4px' }}>Network</span>
         </Link>
 
         <button 

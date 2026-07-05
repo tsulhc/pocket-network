@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { serializeDashboardData } from "@/lib/dashboard-serialization";
+import { serializePublicDashboardData } from "@/lib/dashboard-serialization";
 import { getDashboardDataSafe } from "@/lib/pocket";
 import type { TimeWindow } from "@/lib/types";
 
@@ -22,5 +22,5 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ status: result.status }, { status: 202 });
   }
 
-  return NextResponse.json(serializeDashboardData(result.data));
+  return NextResponse.json(serializePublicDashboardData(result.data));
 }

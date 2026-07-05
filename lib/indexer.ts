@@ -6,14 +6,12 @@ import {
   finishJobRun,
   getDashboardCache,
   getIndexedDailyAggregates,
-  getIndexedProviderDailyAggregates,
   getIndexedProviderAggregates,
-  getIndexedProviderServiceAggregates,
-  getIndexedProviderSupplierAggregates,
   getIndexedServiceAggregates,
   getIndexedServiceDailyAggregates,
   getIndexedHeightCoverage,
   getIndexerState,
+  getGlobalRelayCoverage,
   getLatestIndexedFact,
   markIndexedHeightFailed,
   pruneIndexerData,
@@ -21,17 +19,17 @@ import {
   saveIndexedBlock,
   saveIndexedServices,
   saveIndexedSupplierDomains,
-  saveIndexedSupplierIdentities,
   setDashboardCache,
   setIndexerState,
   setMeta,
   startJobRun,
+  upsertDailyRollup,
   type IndexedSettlementFact,
   type IndexedService,
-  type IndexedSupplierDomain,
-  type IndexedSupplierIdentity
+  type IndexedSupplierDomain
 } from "@/lib/db";
 import type { TimeWindow } from "@/lib/types";
+import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 
 type RpcEvent = {
   type: string;
@@ -77,12 +75,8 @@ type RestServicesResponse = {
 type RestSuppliersResponse = {
   supplier?: Array<{
     operator_address: string;
-    owner_address?: string;
-    stake?: { amount?: string | number | null };
     services?: Array<{
-      service_id?: string | null;
       endpoints?: Array<{ url?: string | null }>;
-      rev_share?: Array<{ address?: string | null; rev_share_percentage?: string | number | null }>;
     }>;
   }>;
   pagination?: { next_key?: string | null };
@@ -107,9 +101,17 @@ type SerializedDashboardCache = {
   earliestSettlementTime: string | null;
   latestSettlementTime: string | null;
   totalRelays: number;
+  totalEstimatedRelays: number;
+  totalEstimatedComputeUnits: number;
+  relayCoverage: number;
   totalRevenueUpokt: string;
   activeProviders: number;
   activeChains: number;
+  suppliersPerSession: number;
+  appsStakedByService: Record<string, number>;
+  sessionObservedHeight: number;
+  sessionFetchedAt: string;
+  sessionStale: boolean;
   providers: Array<{
     providerKey: string;
     providerLabel: string;
@@ -118,36 +120,18 @@ type SerializedDashboardCache = {
     revenueUpokt: string;
     chainCount: number;
     supplierCount: number;
-    suppliers: Array<{
-      operatorAddress: string;
-      ownerAddress: string;
-      domain: string;
-      relays?: number;
-      revenueUpokt?: string;
-      stakeUpokt?: string;
-      chainCount?: number;
-      serviceCount?: number;
-      operatorRevSharePercent?: number;
-      ownerRevSharePercent?: number;
-      otherRevSharePercent?: number;
-      detailAvailable?: boolean;
-    }>;
-    chains: Array<{
-      serviceId: string;
-      serviceName: string;
-      relays: number;
-      computeUnits?: number;
-      computeUnitsPerRelay?: number;
-      revenueUpokt: string;
-    }>;
+    suppliers: [];
+    chains: [];
   }>;
   services: Array<{
     serviceId: string;
     serviceName: string;
     relays: number;
+    estimatedRelays?: number;
     computeUnits?: number;
     computeUnitsPerRelay?: number;
     supplierCount?: number;
+    appsStaked?: number;
     revenueUpokt: string;
     providerCount: number;
   }>;
@@ -206,6 +190,8 @@ const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ??
 const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 4);
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
+const MIGRATION_MAX_RETRIES = 3;
+const MIGRATION_RETRY_DELAY_MS = 5000;
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
 const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
@@ -217,6 +203,10 @@ const SUPPLIER_REWARD_REASONS = new Set([
 let lastCacheBuildAt = 0;
 let cacheDirty = true;
 let liveCatchupInFlight = false;
+let lastSessionSyncAt = 0;
+const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
+const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
+const INDEXER_DATA_VERSION = 2;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
@@ -347,6 +337,13 @@ function parseInteger(value: string | undefined): number {
   return Number(normalizeAttributeValue(value));
 }
 
+function parseMaybeInteger(value: string | undefined): number | undefined {
+  const normalized = normalizeAttributeValue(value);
+  if (!normalized) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function parseUpokt(value: string): bigint {
   const normalized = normalizeAttributeValue(value);
   const match = normalized.match(/^(-?\d+)upokt$/);
@@ -396,56 +393,6 @@ function getPrimaryEndpointDomain(endpointUrls: string[]): string | null {
   return Array.from(domainFrequency.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
 }
 
-function toProviderLabel(providerKey: string): string {
-  if (providerKey.startsWith("owner:")) return `Owner ${providerKey.slice(6, 14)}`;
-  return providerKey
-    .split(/[.-]/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function parseOptionalNumber(value: string | number | null | undefined): number | null {
-  if (value == null) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function parseOptionalBigIntString(value: string | number | null | undefined): string | null {
-  if (value == null) return null;
-  const normalized = String(value).includes(".") ? String(value).split(".")[0] ?? "0" : String(value);
-  try {
-    return BigInt(normalized || "0").toString();
-  } catch {
-    return null;
-  }
-}
-
-function summarizeRevShare(
-  entries: Array<{ address?: string | null; rev_share_percentage?: string | number | null }> | undefined,
-  ownerAddress: string,
-  operatorAddress: string
-): { operatorRevSharePercent: number | null; ownerRevSharePercent: number | null; otherRevSharePercent: number | null } {
-  let operatorRevSharePercent = 0;
-  let ownerRevSharePercent = 0;
-  let otherRevSharePercent = 0;
-
-  for (const entry of entries ?? []) {
-    if (!entry.address) continue;
-    const share = parseOptionalNumber(entry.rev_share_percentage);
-    if (!share || share <= 0) continue;
-    if (entry.address === operatorAddress) operatorRevSharePercent += share;
-    else if (entry.address === ownerAddress) ownerRevSharePercent += share;
-    else otherRevSharePercent += share;
-  }
-
-  return {
-    operatorRevSharePercent: operatorRevSharePercent > 0 ? operatorRevSharePercent : null,
-    ownerRevSharePercent: ownerRevSharePercent > 0 ? ownerRevSharePercent : null,
-    otherRevSharePercent: otherRevSharePercent > 0 ? otherRevSharePercent : null
-  };
-}
-
 function getTimeParts(blockTime: number): { day: string; hour: string } {
   const iso = new Date(blockTime).toISOString();
   return { day: iso.slice(0, 10), hour: iso.slice(0, 13) };
@@ -486,6 +433,9 @@ function parseSettlementFact(event: RpcEvent, height: number, eventIndex: number
     supplierHash: hashIdentity(supplierOperatorAddress),
     ownerHash: supplierOwnerAddress ? hashIdentity(supplierOwnerAddress) : null,
     relays: parseInteger(attributes.num_relays),
+    estimatedRelays: parseMaybeInteger(attributes.num_estimated_relays),
+    claimedComputeUnits: parseMaybeInteger(attributes.num_claimed_compute_units),
+    estimatedComputeUnits: parseMaybeInteger(attributes.num_estimated_compute_units),
     revenueUpokt: supplierRevenueUpokt.toString()
   };
 }
@@ -549,7 +499,6 @@ async function syncServices(): Promise<void> {
 
 async function syncSupplierDomains(): Promise<void> {
   const domains: IndexedSupplierDomain[] = [];
-  const identities: IndexedSupplierIdentity[] = [];
   const unknownDomainHash = hashIdentity("domain:unknown");
   let nextKey = "";
 
@@ -561,36 +510,14 @@ async function syncSupplierDomains(): Promise<void> {
 
       for (const supplier of response.supplier ?? []) {
         if (!supplier.operator_address) continue;
-        const ownerAddress = supplier.owner_address || supplier.operator_address;
         const endpointUrls = (supplier.services ?? []).flatMap((service) =>
           (service.endpoints ?? []).flatMap((endpoint) => (endpoint.url ? [endpoint.url] : []))
         );
         const domain = getPrimaryEndpointDomain(endpointUrls);
-        const providerKey = domain ?? `owner:${ownerAddress}`;
-        const activeServiceIds = new Set(
-          (supplier.services ?? [])
-            .map((service) => service.service_id)
-            .filter((serviceId): serviceId is string => Boolean(serviceId))
-        );
-        const revShares = (supplier.services ?? []).flatMap((service) => service.rev_share ?? []);
-        const revShareSummary = summarizeRevShare(revShares, ownerAddress, supplier.operator_address);
         domains.push({
           supplierHash: hashIdentity(supplier.operator_address),
           domainHash: domain ? hashIdentity(`domain:${domain}`) : unknownDomainHash,
           hasEndpoint: Boolean(domain)
-        });
-        identities.push({
-          supplierHash: hashIdentity(supplier.operator_address),
-          operatorAddress: supplier.operator_address,
-          ownerAddress,
-          providerKey,
-          providerLabel: toProviderLabel(providerKey),
-          providerDomain: domain ?? ownerAddress,
-          stakeUpokt: parseOptionalBigIntString(supplier.stake?.amount),
-          serviceCount: activeServiceIds.size || null,
-          operatorRevSharePercent: revShareSummary.operatorRevSharePercent,
-          ownerRevSharePercent: revShareSummary.ownerRevSharePercent,
-          otherRevSharePercent: revShareSummary.otherRevSharePercent
         });
       }
 
@@ -599,7 +526,6 @@ async function syncSupplierDomains(): Promise<void> {
     }
 
     saveIndexedSupplierDomains(domains);
-    saveIndexedSupplierIdentities(identities);
     logInfo("Supplier domain dimension synced", {
       supplierCount: domains.length,
       domainCount: new Set(domains.map((entry) => entry.domainHash)).size,
@@ -607,6 +533,171 @@ async function syncSupplierDomains(): Promise<void> {
     });
   } catch (error) {
     logWarn("Supplier domain sync failed; existing domain dimension will be reused", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+let sessionSyncedAppsStaked: Record<string, number> | null = null;
+let sessionSyncedSlots: number | null = null;
+let sessionSyncedHeight: number | null = null;
+let sessionSuppliersFetchedAt: string | null = null;
+let sessionAppsFetchedAt: string | null = null;
+
+function getSessionAppsStaked(): Record<string, number> | null {
+  return sessionSyncedAppsStaked;
+}
+
+function getSessionSlots(): number | null {
+  return sessionSyncedSlots;
+}
+
+export function getLiveSessionSuppliersPerSession(): number {
+  return sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
+}
+
+export function getLiveAppsStakedByService(): Record<string, number> {
+  return sessionSyncedAppsStaked ?? {};
+}
+
+type RestApplicationsResponse = {
+  applications?: Array<{
+    service_configs?: Array<{ service_id?: string }>;
+    unstake_session_end_height?: string | number;
+    pending_transfer?: { session_end_height?: string | number };
+  }>;
+  pagination?: { next_key?: string; total?: string };
+};
+
+type RestSessionParamsResponse = {
+  params?: { num_suppliers_per_session?: string | number };
+};
+
+async function syncSessionParameters(snapshotHeight: number): Promise<{ ok: boolean; slots?: number }> {
+  try {
+    const response = await fetchJson<RestSessionParamsResponse>(
+      `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/session/params`
+    );
+    const slots = parseMaybeNumber(response.params?.num_suppliers_per_session);
+    if (slots != null && slots > 0) {
+      return { ok: true, slots };
+    }
+    return { ok: false };
+  } catch (error) {
+    logWarn("Session params sync failed; reusing last-known value", { error: error instanceof Error ? error.message : String(error) });
+    return { ok: false };
+  }
+}
+
+async function syncApplications(snapshotHeight: number): Promise<{ ok: boolean; apps?: Record<string, number> }> {
+  const appCounts: Record<string, number> = {};
+  let nextKey = "";
+
+  try {
+    while (true) {
+      const search = new URLSearchParams({ "pagination.limit": "250" });
+      if (nextKey) search.set("pagination.key", nextKey);
+      const response = await fetchJson<RestApplicationsResponse>(
+        `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/application/application?${search.toString()}`
+      );
+      for (const app of response.applications ?? []) {
+        const serviceId = app.service_configs?.[0]?.service_id;
+        if (!serviceId) continue;
+        const unstakeEnd = parseMaybeNumber(app.unstake_session_end_height);
+        if (unstakeEnd != null && unstakeEnd > 0 && snapshotHeight > unstakeEnd) continue;
+        const transferEnd = parseMaybeNumber(app.pending_transfer?.session_end_height);
+        if (transferEnd != null && transferEnd > 0 && snapshotHeight > transferEnd) continue;
+        appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
+      }
+      nextKey = response.pagination?.next_key ?? "";
+      if (!nextKey) break;
+    }
+
+    return { ok: true, apps: appCounts };
+  } catch (error) {
+    logWarn("Applications sync failed; reusing last-known values", { error: error instanceof Error ? error.message : String(error) });
+    return { ok: false };
+  }
+}
+
+async function syncSessionData(): Promise<boolean> {
+  let snapshotHeight: number;
+  try {
+    snapshotHeight = await getLatestHeight();
+  } catch (error) {
+    logWarn("Session sync aborted; unable to determine current node height", { error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+
+  const [paramsResult, appsResult] = await Promise.all([
+    syncSessionParameters(snapshotHeight),
+    syncApplications(snapshotHeight)
+  ]);
+
+  if (!paramsResult.ok || !appsResult.ok || paramsResult.slots == null || appsResult.apps == null) {
+    logWarn("Session sync incomplete; keeping last-known snapshot", { paramsOk: paramsResult.ok, appsOk: appsResult.ok });
+    return false;
+  }
+
+  const fetchedAt = new Date().toISOString();
+  sessionSyncedSlots = paramsResult.slots;
+  sessionSyncedAppsStaked = appsResult.apps;
+  sessionSyncedHeight = snapshotHeight;
+  sessionSuppliersFetchedAt = fetchedAt;
+  sessionAppsFetchedAt = fetchedAt;
+  setIndexerState("session_snapshot", JSON.stringify({
+    suppliersPerSession: paramsResult.slots,
+    appsStaked: appsResult.apps,
+    observedHeight: snapshotHeight,
+    fetchedAt
+  }));
+  logInfo("Session snapshot published", { suppliersPerSession: paramsResult.slots, totalApps: Object.values(appsResult.apps).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appsResult.apps).length, observedHeight: snapshotHeight });
+  return true;
+}
+
+function warmupSessionState(): void {
+  try {
+    const snapshotRaw = getIndexerState("session_snapshot");
+    if (snapshotRaw) {
+      const parsed = JSON.parse(snapshotRaw) as { suppliersPerSession?: number; appsStaked?: Record<string, number>; observedHeight?: number; fetchedAt?: string };
+      if (Number.isFinite(parsed.suppliersPerSession) && parsed.suppliersPerSession != null && parsed.suppliersPerSession > 0) {
+        sessionSyncedSlots = parsed.suppliersPerSession;
+      }
+      if (parsed.appsStaked && typeof parsed.appsStaked === "object") {
+        sessionSyncedAppsStaked = parsed.appsStaked;
+      }
+      if (parsed.observedHeight != null) sessionSyncedHeight = parsed.observedHeight;
+      if (parsed.fetchedAt) {
+        sessionSuppliersFetchedAt = parsed.fetchedAt;
+        sessionAppsFetchedAt = parsed.fetchedAt;
+      }
+    }
+  } catch { /* keep null */ }
+
+  if (sessionSyncedSlots == null) {
+    try {
+      const slotsRaw = getIndexerState("session_suppliers_per_session");
+      if (slotsRaw) {
+        const parsed = JSON.parse(slotsRaw) as { value: number; sourceHeight?: number; fetchedAt?: string };
+        if (Number.isFinite(parsed.value) && parsed.value > 0) {
+          sessionSyncedSlots = parsed.value;
+          if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
+          if (parsed.fetchedAt) sessionSuppliersFetchedAt = parsed.fetchedAt;
+        }
+      }
+    } catch { /* keep null */ }
+  }
+
+  if (sessionSyncedAppsStaked == null) {
+    try {
+      const appsRaw = getIndexerState("session_apps_staked");
+      if (appsRaw) {
+        const parsed = JSON.parse(appsRaw) as { value: Record<string, number>; sourceHeight?: number; fetchedAt?: string };
+        if (parsed.value && typeof parsed.value === "object") {
+          sessionSyncedAppsStaked = parsed.value;
+          if (parsed.sourceHeight) sessionSyncedHeight = parsed.sourceHeight;
+          if (parsed.fetchedAt) sessionAppsFetchedAt = parsed.fetchedAt;
+        }
+      }
+    } catch { /* keep null */ }
   }
 }
 
@@ -618,7 +709,14 @@ function windowMs(window: TimeWindow): number {
       return 7 * 24 * 60 * 60 * 1000;
     case "30d":
       return 30 * 24 * 60 * 60 * 1000;
+    case "365d":
+      return 365 * 24 * 60 * 60 * 1000;
   }
+}
+
+function getStartOfTodayUtc(): number {
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
 function getCachedPrice(): number {
@@ -657,8 +755,16 @@ async function refreshPrice(): Promise<number> {
   return getCachedPrice();
 }
 
-function serializeDailyCache(rows: Array<{ day: string; relays: number; revenue_upokt: string }>): Array<{ day: string; relays: number; revenueUpokt: string }> {
-  return rows.map((row) => ({ day: row.day, relays: row.relays, revenueUpokt: row.revenue_upokt }));
+function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>, migrationComplete: boolean): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
+  return rows.map((row) => ({
+    day: row.day,
+    relays: row.relays,
+    estimatedRelays: migrationComplete ? (row.estimated_relays ?? undefined) : undefined,
+    estimatedComputeUnits: migrationComplete ? (row.estimated_compute_units ?? undefined) : undefined,
+    isEstimated: migrationComplete && (row.estimated_relays ?? 0) > 0 && (row.estimated_relays ?? 0) !== row.relays ? true : undefined,
+    relayCoverage: migrationComplete ? (row.relay_coverage ?? undefined) : undefined,
+    revenueUpokt: row.revenue_upokt
+  }));
 }
 
 function setProviderDataCache<T>(key: string, data: T): void {
@@ -680,14 +786,30 @@ export async function rebuildIndexerCaches(): Promise<void> {
     const latestSeenHeight = Number(getIndexerState("latest_seen_height") ?? latestHeight);
     const latestFact = getLatestIndexedFact();
     const poktPriceUsd = await refreshPrice();
+    const liveSuppliersPerSession = sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
+    const liveAppsStaked = sessionSyncedAppsStaked ?? {};
+    const oldestFetchedAt = [sessionSuppliersFetchedAt, sessionAppsFetchedAt]
+      .filter((value): value is string => value != null)
+      .sort()[0] ?? "";
+    const oldestFetchedAtMs = oldestFetchedAt ? new Date(oldestFetchedAt).getTime() : NaN;
+    const sessionStale = sessionSyncedSlots == null
+      || sessionSyncedAppsStaked == null
+      || !Number.isFinite(oldestFetchedAtMs)
+      || Date.now() - oldestFetchedAtMs > SESSION_FRESHNESS_MS;
+    const migrationComplete = Number(getIndexerState("data_version") ?? "0") >= INDEXER_DATA_VERSION;
 
     for (const window of WINDOWS) {
-      const since = Date.now() - windowMs(window);
+      const since = window === "30d" ? getStartOfTodayUtc() - windowMs(window) : Date.now() - windowMs(window);
       const serviceRows = getIndexedServiceAggregates(since);
       const providerRows = getIndexedProviderAggregates(since);
-      const providerServiceRows = getIndexedProviderServiceAggregates(since);
-      const providerSupplierRows = getIndexedProviderSupplierAggregates(since);
       const totalRelays = serviceRows.reduce((sum, row) => sum + row.relays, 0);
+      const totalEstimatedRelays = migrationComplete
+        ? serviceRows.reduce((sum, row) => sum + (row.estimated_relays ?? row.relays), 0)
+        : totalRelays;
+      const totalEstimatedComputeUnits = migrationComplete
+        ? serviceRows.reduce((sum, row) => sum + (row.estimated_compute_units ?? 0), 0)
+        : 0;
+      const relayCoverage = migrationComplete ? getGlobalRelayCoverage(since) : 0;
       const totalRevenueUpokt = serviceRows.reduce((sum, row) => sum + BigInt(row.revenue_upokt), 0n);
       const earliestSettlementTime = serviceRows.length > 0 ? new Date(since).toISOString() : null;
       const latestSettlementTime = latestFact ? new Date(latestFact.block_time).toISOString() : null;
@@ -695,63 +817,25 @@ export async function rebuildIndexerCaches(): Promise<void> {
         serviceId: row.service_id,
         serviceName: row.service_name ?? row.service_id,
         relays: row.relays,
-        computeUnits: row.compute_units_per_relay ? row.compute_units_per_relay * row.relays : undefined,
-        computeUnitsPerRelay: row.compute_units_per_relay ?? undefined,
+        estimatedRelays: migrationComplete ? (row.estimated_relays ?? row.relays) : row.relays,
+        computeUnits: migrationComplete ? (row.estimated_compute_units ?? undefined) : undefined,
+        computeUnitsPerRelay: migrationComplete ? (row.compute_units_per_relay ?? undefined) : undefined,
         supplierCount: row.supplier_count,
+        appsStaked: liveAppsStaked[row.service_id] ?? undefined,
         revenueUpokt: row.revenue_upokt,
         providerCount: row.provider_count
       }));
-
-      const chainsByProvider = new Map<string, SerializedDashboardCache["providers"][number]["chains"]>();
-      for (const row of providerServiceRows) {
-        const chains = chainsByProvider.get(row.provider_key) ?? [];
-        chains.push({
-          serviceId: row.service_id,
-          serviceName: row.service_name ?? row.service_id,
-          relays: row.relays,
-          computeUnits: row.compute_units_per_relay ? row.compute_units_per_relay * row.relays : undefined,
-          computeUnitsPerRelay: row.compute_units_per_relay ?? undefined,
-          revenueUpokt: row.revenue_upokt
-        });
-        chainsByProvider.set(row.provider_key, chains);
-      }
-
-      const suppliersByProvider = new Map<string, SerializedDashboardCache["providers"][number]["suppliers"]>();
-      for (const row of providerSupplierRows) {
-        const suppliers = suppliersByProvider.get(row.provider_key) ?? [];
-        suppliers.push({
-          operatorAddress: row.operator_address,
-          ownerAddress: row.owner_address,
-          domain: row.provider_domain ?? row.provider_key,
-          relays: row.relays,
-          revenueUpokt: row.revenue_upokt,
-          stakeUpokt: row.stake_upokt ?? undefined,
-          chainCount: row.service_count,
-          serviceCount: row.supplier_service_count ?? undefined,
-          operatorRevSharePercent: row.operator_rev_share_percent ?? undefined,
-          ownerRevSharePercent: row.owner_rev_share_percent ?? undefined,
-          otherRevSharePercent: row.other_rev_share_percent ?? undefined,
-          detailAvailable: true
-        });
-        suppliersByProvider.set(row.provider_key, suppliers);
-      }
-
-      const providers = providerRows.map((row) => ({
-        providerKey: row.provider_key,
-        providerLabel: row.provider_label ?? toProviderLabel(row.provider_key),
-        providerDomain: row.provider_domain ?? row.provider_key,
+      const providers = providerRows.map((row, index) => ({
+        providerKey: `provider-group-${index + 1}`,
+        providerLabel: `Provider group ${index + 1}`,
+        providerDomain: "anonymous",
         relays: row.relays,
         revenueUpokt: row.revenue_upokt,
         chainCount: row.service_count,
-        supplierCount: row.supplier_count,
-        suppliers: suppliersByProvider.get(row.provider_key) ?? [],
-        chains: chainsByProvider.get(row.provider_key) ?? []
+        supplierCount: 1,
+        suppliers: [] as [],
+        chains: [] as []
       }));
-
-      for (const provider of providers) {
-        setProviderDataCache(`provider_supplier_breakdown:${provider.providerKey}:${window}`, provider.suppliers);
-      }
-
       const payload: SerializedDashboardCache = {
         window,
         generatedAt: new Date().toISOString(),
@@ -766,9 +850,17 @@ export async function rebuildIndexerCaches(): Promise<void> {
         earliestSettlementTime,
         latestSettlementTime,
         totalRelays,
+        totalEstimatedRelays,
+        totalEstimatedComputeUnits,
+        relayCoverage,
         totalRevenueUpokt: totalRevenueUpokt.toString(),
         activeProviders: providerRows.length,
         activeChains: services.length,
+        suppliersPerSession: liveSuppliersPerSession,
+        appsStakedByService: liveAppsStaked,
+        sessionObservedHeight: sessionSyncedHeight ?? 0,
+        sessionFetchedAt: oldestFetchedAt,
+        sessionStale,
         providers,
         services
       };
@@ -778,15 +870,19 @@ export async function rebuildIndexerCaches(): Promise<void> {
       }
     }
 
-    const dailyRows = getIndexedDailyAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    setProviderDataCache("network_daily_history:30", serializeDailyCache(dailyRows));
-    for (const provider of getIndexedProviderAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000).slice(0, 250)) {
-      const rows = getIndexedProviderDailyAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000, provider.provider_key);
-      setProviderDataCache(`provider_daily_history:${provider.provider_domain ?? provider.provider_key}:30`, serializeDailyCache(rows));
+    const dailySince = getStartOfTodayUtc() - 30 * 24 * 60 * 60 * 1000;
+    const dailyRows = getIndexedDailyAggregates(dailySince);
+    setProviderDataCache("network_daily_history:30", serializeDailyCache(dailyRows, migrationComplete));
+    for (const service of getIndexedServiceAggregates(dailySince).slice(0, 100)) {
+      const rows = getIndexedServiceDailyAggregates(dailySince, service.service_id);
+      setProviderDataCache(`service_daily_history:${service.service_id}:30`, serializeDailyCache(rows, migrationComplete));
     }
-    for (const service of getIndexedServiceAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000).slice(0, 100)) {
-      const rows = getIndexedServiceDailyAggregates(Date.now() - 30 * 24 * 60 * 60 * 1000, service.service_id);
-      setProviderDataCache(`service_daily_history:${service.service_id}:30`, serializeDailyCache(rows));
+
+    if (migrationComplete) {
+      const generatedAt = new Date().toISOString();
+      for (const row of dailyRows) {
+        upsertDailyRollup({ ...row, generated_at: generatedAt });
+      }
     }
 
     setProviderDataCache("indexer_status", {
@@ -807,7 +903,16 @@ export async function rebuildIndexerCaches(): Promise<void> {
 }
 
 async function maybeRebuildCaches(force = false): Promise<void> {
+  if (Date.now() - lastSessionSyncAt > SESSION_SYNC_INTERVAL_MS) {
+    const success = await syncSessionData();
+    if (success) {
+      lastSessionSyncAt = Date.now();
+      cacheDirty = true;
+    }
+  }
+
   if (!force && (!cacheDirty || Date.now() - lastCacheBuildAt < CACHE_INTERVAL_MS)) return;
+
   await rebuildIndexerCaches();
 }
 
@@ -1051,6 +1156,54 @@ function estimateBackfillStart(latestHeight: number, days: number): number {
   return Math.max(1, latestHeight - Math.ceil((days * 24 * 60 * 60) / averageBlockSeconds));
 }
 
+async function runDataMigration(): Promise<void> {
+  const storedVersion = Number(getIndexerState("data_version") ?? "0");
+  if (storedVersion >= INDEXER_DATA_VERSION) return;
+
+  const latestHeight = Number(getIndexerState("last_processed_height") ?? 0);
+  const latestSeenHeight = Number(getIndexerState("latest_seen_height") ?? latestHeight);
+  const retentionStartHeight = estimateBackfillStart(latestSeenHeight, RETENTION_DAYS);
+
+  const coverage = getIndexedHeightCoverage(retentionStartHeight, latestHeight);
+  const indexedHeights = coverage
+    .filter((row) => row.status === "indexed")
+    .map((row) => row.height)
+    .sort((a, b) => b - a);
+
+  if (indexedHeights.length === 0) {
+    setIndexerState("data_version", String(INDEXER_DATA_VERSION));
+    return;
+  }
+
+  logInfo("Running data migration", { fromVersion: storedVersion, toVersion: INDEXER_DATA_VERSION, heightCount: indexedHeights.length });
+
+  let totalFailed = 0;
+  for (let i = 0; i < indexedHeights.length; i += REPAIR_BATCH_SIZE) {
+    const batch = indexedHeights.slice(i, i + REPAIR_BATCH_SIZE);
+    let lastResult: { repaired: number; failed: number; events: number } = { repaired: 0, failed: batch.length, events: 0 };
+    for (let attempt = 0; attempt < MIGRATION_MAX_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        const delay = MIGRATION_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+        logWarn("Retrying failed migration batch", { attempt: attempt + 1, batchSize: batch.length, delay });
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      lastResult = await processRepairHeights(batch, REPAIR_CONCURRENCY, "data-migration");
+      if (lastResult.failed === 0) break;
+      logWarn("Migration batch had failures", { attempt: attempt + 1, failed: lastResult.failed, batchSize: batch.length });
+    }
+    totalFailed += lastResult.failed;
+  }
+
+  if (totalFailed > 0) {
+    logWarn("Data migration incomplete; not advancing version", { version: INDEXER_DATA_VERSION, totalFailed });
+    return;
+  }
+
+  setIndexerState("data_version", String(INDEXER_DATA_VERSION));
+  await rebuildIndexerCaches();
+  logInfo("Data migration complete", { version: INDEXER_DATA_VERSION, reprocessedHeights: indexedHeights.length });
+}
+
 async function runCatchup(options: IndexerOptions): Promise<void> {
   const latestHeight = options.toHeight ?? await getLatestHeight();
   const checkpoint = Number(getIndexerState("last_processed_height") ?? 0);
@@ -1127,6 +1280,12 @@ async function runLiveStartupTasks(): Promise<void> {
     await syncSupplierDomains();
   } catch (error) {
     logError("Supplier domain sync failed during live startup", error);
+  }
+
+  try {
+    await syncSessionData();
+  } catch (error) {
+    logError("Session data sync failed during live startup", error);
   }
 
   try {
@@ -1233,8 +1392,12 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
   const jobId = startJobRun("indexer_start", options as Record<string, unknown>);
   const liveFirst = Boolean(options.live && !options.once && !options.backfillDays && !options.fromHeight && !options.toHeight);
 
+  warmupSessionState();
+
   try {
     logInfo("Starting Pocket indexer", options as Record<string, unknown>);
+    await runDataMigration();
+
     if (liveFirst) {
       void runLiveStartupTasks().catch((error) => logError("Live startup background tasks failed", error));
       finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt, liveFirst: true });
@@ -1244,6 +1407,7 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
 
     await syncServices();
     await syncSupplierDomains();
+    await syncSessionData();
     await runCatchup(options);
     pruneIndexerData(RETENTION_DAYS);
     finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt });

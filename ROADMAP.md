@@ -2,25 +2,28 @@
 
 ## Stato Attuale
 
-La codebase attuale ha gia una dashboard demo funzionante e non parte piu da un repository vuoto.
+La codebase attuale ha gia una dashboard demo funzionante e non parte piu da un repository vuoto. Dopo il feedback PNF, `main` e orientato a una dashboard pubblica neutrale: niente classifiche nominali di provider, niente detail page provider, niente ranking per staker e niente esposizione pubblica del mix operativo dei singoli provider.
+
+La versione precedente orientata agli operatori e preservata nel branch `provider`.
 
 Oggi il progetto ha gia:
 
 - app Next.js con dashboard pubblica
 - filtri `24h`, `7d`, `30d`
-- leaderboard provider e vista servizi
+- vista servizi, trend reward aggregati e opportunity scoring
 - revenue calculator orientato all'onboarding
 - cache persistita in SQLite
-- fonte primaria `Poktscan` con fallback RPC diretto
+- nuovo indexer RPC/WebSocket proprietario in fase di adozione
+- fallback legacy `Poktscan`/RPC diretto ancora disponibile temporaneamente
 
 Questa roadmap quindi descrive soprattutto l'evoluzione verso una RC1 piu rigorosa e storicamente completa, non un lavoro da rifare da zero.
 
 ## Obiettivo RC1
 
-Costruire una dashboard visiva per Pocket Network focalizzata sull'onboarding dei nuovi provider, con due metriche economiche iniziali:
+Costruire una dashboard visiva per Pocket Network focalizzata sull'onboarding dei nuovi provider in modo neutrale verso gli operatori commerciali, con due metriche economiche iniziali:
 
-- relay eseguiti per chain per provider
-- revenue per provider
+- relay eseguiti per service e domanda aggregata
+- revenue aggregata, yield medio/mediano e metriche di competizione non nominali
 
 con filtri temporali `24h`, `7d`, `30d`.
 
@@ -110,13 +113,17 @@ Done when:
 
 Output:
 
-- worker che scorre blocchi in ordine crescente
+- worker/indexer che scorre blocchi in ordine crescente e segue nuovi blocchi via WebSocket
 - parser di `EventClaimSettled`
 - persistenza idempotente
 
 Task:
 
 - leggere `end_block_events` per altezza
+- usare subscription `tm.event='NewBlock'` e recuperare `/block_results?height=N`
+- mantenere live WebSocket e repair storico come responsabilità dello stesso processo indexer
+- trovare e riempire autonomamente buchi di height negli ultimi 45 giorni
+- eseguire backfill storico a batch concorrenti con checkpoint ordinato e cache rebuild finale
 - filtrare gli eventi di tipo `EventClaimSettled`
 - salvare campi raw principali: blocco, timestamp, session, service, supplier, reward breakdown
 - costruire checkpoint di sync per resume in caso di restart
@@ -165,14 +172,15 @@ Done when:
 Output:
 
 - query/API per `24h`, `7d`, `30d`
-- leaderboard provider
-- breakdown relay per chain per provider
+- aggregati pubblici non nominali per provider/domain count, reward medio/mediano e concentrazione
+- vista service-level per relay, revenue, supplier density e opportunita di ingresso
 
 Task:
 
 - materializzare o calcolare on demand gli aggregati su `block_time`
-- sommare `num_relays` per `supplier_operator_address + service_id`
-- sommare supplier revenue per `supplier_operator_address`
+- sommare `num_relays` per `supplier_operator_address + service_id` nel modello interno
+- sommare supplier revenue per `supplier_operator_address` nel modello interno
+- pubblicare su `main` solo aggregati non nominali e service-level metrics
 - opzionalmente preparare anche metriche secondarie: `minted_upokt`, `settled_upokt`, `overservicing_loss_upokt`, `deflation_loss_upokt`
 
 Done when:
@@ -185,15 +193,15 @@ Done when:
 Output:
 
 - dashboard con filtri temporali `24h`, `7d`, `30d`
-- vista top provider per revenue
-- tabella o heatmap relay per chain per provider
+- vista service demand e reward trend
+- growth calculator e opportunity scoring senza naming dei provider
 
 Task:
 
 - costruire time selector globale
 - creare KPI cards principali
-- aggiungere tabella provider con sorting e ricerca
-- aggiungere dettaglio provider con breakdown per service
+- aggiungere explorer servizi con sorting e ricerca
+- mantenere eventuali breakdown provider-level solo nel branch `provider`, non su `main`
 
 Done when:
 
@@ -230,7 +238,7 @@ Done when:
 ### Sprint 2
 
 - enrichment suppliers/services
-- UI RC1 con leaderboard e breakdown
+- UI RC1 con service explorer e metriche pubbliche non nominali
 - validazioni con dataset reale
 
 ### Sprint 3
