@@ -2,6 +2,8 @@ type TimeseriesPoint = {
   label: string;
   value: number;
   secondaryValue?: number;
+  /** When true, the bar represents estimated (not fully sampled) data. */
+  isEstimated?: boolean;
 };
 
 type TimeseriesPanelProps = {
@@ -85,26 +87,29 @@ export default function TimeseriesPanel({
             <svg className="timeseries-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" style={{ opacity: 0.8 }}>
               <path d={linePath} />
             </svg>
-            {displayPoints.map((point) => {
-              const height = maxValue === 0 ? 2 : Math.max(4, Math.round((point.value / maxValue) * 100));
-              const isActive = point === latestPoint;
-              
-              return (
-                <div key={point.label} className="timeseries-bar-group" title={`${point.label}: ${formatValue(point.value)}`}>
-                  <div 
-                    className="timeseries-bar" 
-                    style={{ 
-                      height: `${height}%`,
-                      background: isActive ? 'var(--section-accent, var(--accent))' : undefined,
-                      boxShadow: isActive ? `0 0 15px color-mix(in srgb, var(--section-accent, var(--accent)), transparent 60%)` : undefined
-                    }} 
-                  />
-                  <span style={{ fontWeight: isActive ? 800 : 500, color: isActive ? 'var(--text)' : 'var(--muted)' }}>
-                    {point.label.slice(5)}
-                  </span>
-                </div>
-              );
-            })}
+              {displayPoints.map((point) => {
+                const height = maxValue === 0 ? 2 : Math.max(4, Math.round((point.value / maxValue) * 100));
+                const isActive = point === latestPoint;
+                const isEstimatedPoint = point.isEstimated === true;
+
+                return (
+                  <div key={point.label} className="timeseries-bar-group" title={`${point.label}: ${formatValue(point.value)}${isEstimatedPoint ? " (estimated)" : ""}`}>
+                    <div 
+                      className="timeseries-bar" 
+                      style={{ 
+                        height: `${height}%`,
+                        background: isActive ? 'var(--section-accent, var(--accent))' : undefined,
+                        boxShadow: isActive ? `0 0 15px color-mix(in srgb, var(--section-accent, var(--accent)), transparent 60%)` : undefined,
+                        border: isEstimatedPoint ? '1px dashed var(--muted)' : undefined,
+                        opacity: isEstimatedPoint ? 0.6 : undefined,
+                      }} 
+                    />
+                    <span style={{ fontWeight: isActive ? 800 : 500, color: isActive ? 'var(--text)' : 'var(--muted)' }}>
+                      {point.label.slice(5)}
+                    </span>
+                  </div>
+                );
+              })}
           </div>
 
           <p className="footer-note" style={{ textAlign: 'center', color: 'var(--muted)', fontSize: '0.8rem' }}>

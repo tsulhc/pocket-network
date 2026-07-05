@@ -24,7 +24,7 @@ const SORT_COLUMNS: SortColumn[] = [
   { key: "relays", label: "Final Relays", align: "right" },
   { key: "providers", label: "Domains", align: "right" },
   { key: "suppliers", label: "Suppliers", align: "right" },
-  { key: "appsStaked", label: "Apps", align: "right", tooltip: "Number of applications staked for this service (live snapshot)." },
+  { key: "appsStaked", label: "Apps", align: "right", tooltip: "Applications staked for this service (live snapshot). Auxiliary metric — does not affect the demand signal ranking." },
   { key: "revenuePerProvider", label: "Avg Domain Reward", align: "right" },
   {
     key: "opportunity",

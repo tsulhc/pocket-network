@@ -91,6 +91,9 @@ export type NetworkDailyHistoryPoint = {
   relays: number;
   estimatedRelays?: number;
   estimatedComputeUnits?: number;
+  /** True when the day's relays include estimated values, not just sampled/indexed facts. */
+  isEstimated?: boolean;
+  relayCoverage?: number;
   revenueUpokt: bigint;
 };
 

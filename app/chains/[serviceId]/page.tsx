@@ -71,7 +71,8 @@ export default async function ChainDetailPage({ params }: PageProps) {
   const historyPoints = history.map((point, index) => ({
     label: point.day,
     value: historyValues[index] ?? 0,
-    secondaryValue: historyAverage[index] ?? 0
+    secondaryValue: historyAverage[index] ?? 0,
+    isEstimated: point.isEstimated,
   }));
   const revenuePerProvider = toPoktNumber(service.revenueUpokt) / Math.max(service.providerCount, 1);
   const suppliersPerDomain = (service.supplierCount ?? 0) / Math.max(service.providerCount, 1);

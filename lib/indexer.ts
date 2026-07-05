@@ -754,12 +754,14 @@ async function refreshPrice(): Promise<number> {
   return getCachedPrice();
 }
 
-function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; revenue_upokt: string }>): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; revenueUpokt: string }> {
+function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
   return rows.map((row) => ({
     day: row.day,
     relays: row.relays,
     estimatedRelays: row.estimated_relays ?? undefined,
     estimatedComputeUnits: row.estimated_compute_units ?? undefined,
+    isEstimated: (row.estimated_relays ?? 0) > 0 && (row.estimated_relays ?? 0) !== row.relays ? true : undefined,
+    relayCoverage: row.relay_coverage ?? undefined,
     revenueUpokt: row.revenue_upokt
   }));
 }
@@ -793,15 +795,22 @@ export async function rebuildIndexerCaches(): Promise<void> {
       || sessionSyncedAppsStaked == null
       || !Number.isFinite(oldestFetchedAtMs)
       || Date.now() - oldestFetchedAtMs > SESSION_FRESHNESS_MS;
+    const migrationComplete = Number(getIndexerState("data_version") ?? "0") >= INDEXER_DATA_VERSION;
 
     for (const window of WINDOWS) {
       const since = window === "30d" ? getStartOfTodayUtc() - windowMs(window) : Date.now() - windowMs(window);
       const serviceRows = getIndexedServiceAggregates(since);
       const providerRows = getIndexedProviderAggregates(since);
       const totalRelays = serviceRows.reduce((sum, row) => sum + row.relays, 0);
-      const totalEstimatedRelays = serviceRows.reduce((sum, row) => sum + (row.estimated_relays ?? row.relays), 0);
-      const totalEstimatedComputeUnits = serviceRows.reduce((sum, row) => sum + (row.estimated_compute_units ?? 0), 0);
-      const relayCoverage = serviceRows.length === 0 ? 0 : serviceRows.reduce((sum, row) => sum + (row.relay_coverage ?? 0), 0) / serviceRows.length;
+      const totalEstimatedRelays = migrationComplete
+        ? serviceRows.reduce((sum, row) => sum + (row.estimated_relays ?? row.relays), 0)
+        : totalRelays;
+      const totalEstimatedComputeUnits = migrationComplete
+        ? serviceRows.reduce((sum, row) => sum + (row.estimated_compute_units ?? 0), 0)
+        : 0;
+      const relayCoverage = migrationComplete
+        ? (totalEstimatedRelays <= 0 ? 0 : totalRelays >= totalEstimatedRelays ? 1 : totalRelays / totalEstimatedRelays)
+        : 0;
       const totalRevenueUpokt = serviceRows.reduce((sum, row) => sum + BigInt(row.revenue_upokt), 0n);
       const earliestSettlementTime = serviceRows.length > 0 ? new Date(since).toISOString() : null;
       const latestSettlementTime = latestFact ? new Date(latestFact.block_time).toISOString() : null;
@@ -809,9 +818,9 @@ export async function rebuildIndexerCaches(): Promise<void> {
         serviceId: row.service_id,
         serviceName: row.service_name ?? row.service_id,
         relays: row.relays,
-        estimatedRelays: row.estimated_relays ?? row.relays,
-        computeUnits: row.estimated_compute_units ?? undefined,
-        computeUnitsPerRelay: row.compute_units_per_relay ?? undefined,
+        estimatedRelays: migrationComplete ? (row.estimated_relays ?? row.relays) : row.relays,
+        computeUnits: migrationComplete ? (row.estimated_compute_units ?? undefined) : undefined,
+        computeUnitsPerRelay: migrationComplete ? (row.compute_units_per_relay ?? undefined) : undefined,
         supplierCount: row.supplier_count,
         appsStaked: liveAppsStaked[row.service_id] ?? undefined,
         revenueUpokt: row.revenue_upokt,
