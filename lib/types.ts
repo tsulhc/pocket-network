@@ -45,6 +45,7 @@ export type ServiceStats = {
   computeUnitsPerRelay?: number;
   estimatedComputeUnits?: number;
   supplierCount?: number;
+  appsStaked?: number;
   revenueUpokt: bigint;
   providerCount: number;
 };
@@ -69,6 +70,11 @@ export type DashboardData = {
   totalRevenueUpokt: bigint;
   activeProviders: number;
   activeChains: number;
+  suppliersPerSession: number;
+  appsStakedByService: Record<string, number>;
+  sessionSourceHeight: number;
+  sessionFetchedAt: string;
+  sessionStale: boolean;
   providers: ProviderStats[];
   services: ServiceStats[];
 };

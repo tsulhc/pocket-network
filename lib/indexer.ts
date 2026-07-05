@@ -106,6 +106,11 @@ type SerializedDashboardCache = {
   totalRevenueUpokt: string;
   activeProviders: number;
   activeChains: number;
+  suppliersPerSession: number;
+  appsStakedByService: Record<string, number>;
+  sessionSourceHeight: number;
+  sessionFetchedAt: string;
+  sessionStale: boolean;
   providers: Array<{
     providerKey: string;
     providerLabel: string;
@@ -125,6 +130,7 @@ type SerializedDashboardCache = {
     computeUnits?: number;
     computeUnitsPerRelay?: number;
     supplierCount?: number;
+    appsStaked?: number;
     revenueUpokt: string;
     providerCount: number;
   }>;
@@ -196,6 +202,7 @@ let cacheDirty = true;
 let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
+const INDEXER_DATA_VERSION = 1;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
@@ -549,22 +556,25 @@ type RestApplicationsResponse = {
   applications?: Array<{
     service_configs?: Array<{ service_id?: string }>;
     unstake_session_end_height?: string | number;
-    pending_transfer?: unknown;
+    pending_transfer?: { session_end_height?: string | number };
   }>;
   pagination?: { next_key?: string; total?: string };
+  height?: string | number;
 };
 
 type RestSessionParamsResponse = {
   params?: { num_suppliers_per_session?: string | number };
+  height?: string | number;
 };
 
-async function syncSessionParameters(): Promise<void> {
+async function syncSessionParameters(): Promise<boolean> {
   try {
-    const sourceHeight = Number(getIndexerState("last_processed_height") ?? 0);
     const response = await fetchJson<RestSessionParamsResponse>(
       `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/session/params`
     );
     const slots = parseMaybeNumber(response.params?.num_suppliers_per_session);
+    const queryHeight = parseMaybeNumber(response.height);
+    const sourceHeight = queryHeight ?? Number(getIndexerState("last_processed_height") ?? 0);
     if (slots != null && slots > 0) {
       sessionSyncedSlots = slots;
       sessionSyncedHeight = sourceHeight;
@@ -572,16 +582,19 @@ async function syncSessionParameters(): Promise<void> {
         value: slots, sourceHeight, fetchedAt: new Date().toISOString()
       }));
       logInfo("Session parameters synced", { suppliersPerSession: slots, sourceHeight });
+      return true;
     }
+    return false;
   } catch (error) {
     logWarn("Session params sync failed; reusing last-known value", { error: error instanceof Error ? error.message : String(error) });
+    return false;
   }
 }
 
-async function syncApplications(): Promise<void> {
+async function syncApplications(): Promise<boolean> {
   const appCounts: Record<string, number> = {};
   let nextKey = "";
-  const sourceHeight = Number(getIndexerState("last_processed_height") ?? 0);
+  let sourceHeight = Number(getIndexerState("last_processed_height") ?? 0);
 
   try {
     while (true) {
@@ -590,11 +603,17 @@ async function syncApplications(): Promise<void> {
       const response = await fetchJson<RestApplicationsResponse>(
         `${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/application/application?${search.toString()}`
       );
+      if (sourceHeight === 0) {
+        const queryHeight = parseMaybeNumber(response.height);
+        if (queryHeight != null && queryHeight > 0) sourceHeight = queryHeight;
+      }
       for (const app of response.applications ?? []) {
         const serviceId = app.service_configs?.[0]?.service_id;
         if (!serviceId) continue;
         const unstakeEnd = parseMaybeNumber(app.unstake_session_end_height);
         if (unstakeEnd != null && unstakeEnd > 0 && sourceHeight > unstakeEnd) continue;
+        const transferEnd = parseMaybeNumber(app.pending_transfer?.session_end_height);
+        if (transferEnd != null && transferEnd > 0 && sourceHeight > transferEnd) continue;
         appCounts[serviceId] = (appCounts[serviceId] ?? 0) + 1;
       }
       nextKey = response.pagination?.next_key ?? "";
@@ -607,14 +626,17 @@ async function syncApplications(): Promise<void> {
       value: appCounts, sourceHeight, fetchedAt: new Date().toISOString()
     }));
     logInfo("Applications synced", { totalApps: Object.values(appCounts).reduce((sum, count) => sum + count, 0), serviceCount: Object.keys(appCounts).length, sourceHeight });
+    return true;
   } catch (error) {
     logWarn("Applications sync failed; reusing last-known values", { error: error instanceof Error ? error.message : String(error) });
+    return false;
   }
 }
 
-async function syncSessionData(): Promise<void> {
-  await syncSessionParameters();
-  await syncApplications();
+async function syncSessionData(): Promise<boolean> {
+  const paramsOk = await syncSessionParameters();
+  const appsOk = await syncApplications();
+  return paramsOk && appsOk;
 }
 
 function warmupSessionState(): void {
@@ -718,6 +740,16 @@ export async function rebuildIndexerCaches(): Promise<void> {
     const latestSeenHeight = Number(getIndexerState("latest_seen_height") ?? latestHeight);
     const latestFact = getLatestIndexedFact();
     const poktPriceUsd = await refreshPrice();
+    const liveSuppliersPerSession = sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
+    const liveAppsStaked = sessionSyncedAppsStaked ?? {};
+    const sessionFetchedAt = (() => {
+      try {
+        const raw = getIndexerState("session_apps_staked");
+        if (raw) return (JSON.parse(raw) as { fetchedAt?: string }).fetchedAt ?? "";
+      } catch { /* ignore */ }
+      return "";
+    })();
+    const sessionStale = sessionSyncedSlots == null || sessionSyncedAppsStaked == null;
 
     for (const window of WINDOWS) {
       const since = window === "30d" ? getStartOfTodayUtc() - windowMs(window) : Date.now() - windowMs(window);
@@ -738,6 +770,7 @@ export async function rebuildIndexerCaches(): Promise<void> {
         computeUnits: row.estimated_compute_units ?? undefined,
         computeUnitsPerRelay: row.compute_units_per_relay ?? undefined,
         supplierCount: row.supplier_count,
+        appsStaked: liveAppsStaked[row.service_id] ?? undefined,
         revenueUpokt: row.revenue_upokt,
         providerCount: row.provider_count
       }));
@@ -772,6 +805,11 @@ export async function rebuildIndexerCaches(): Promise<void> {
         totalRevenueUpokt: totalRevenueUpokt.toString(),
         activeProviders: providerRows.length,
         activeChains: services.length,
+        suppliersPerSession: liveSuppliersPerSession,
+        appsStakedByService: liveAppsStaked,
+        sessionSourceHeight: sessionSyncedHeight ?? 0,
+        sessionFetchedAt,
+        sessionStale,
         providers,
         services
       };
@@ -813,11 +851,10 @@ export async function rebuildIndexerCaches(): Promise<void> {
 
 async function maybeRebuildCaches(force = false): Promise<void> {
   if (Date.now() - lastSessionSyncAt > SESSION_SYNC_INTERVAL_MS) {
-    try {
-      await syncSessionData();
+    const success = await syncSessionData();
+    if (success) {
       lastSessionSyncAt = Date.now();
-    } catch (error) {
-      logWarn("Periodic session sync failed", { error: error instanceof Error ? error.message : String(error) });
+      cacheDirty = true;
     }
   }
 
@@ -1066,6 +1103,37 @@ function estimateBackfillStart(latestHeight: number, days: number): number {
   return Math.max(1, latestHeight - Math.ceil((days * 24 * 60 * 60) / averageBlockSeconds));
 }
 
+async function runDataMigration(): Promise<void> {
+  const storedVersion = Number(getIndexerState("data_version") ?? "0");
+  if (storedVersion >= INDEXER_DATA_VERSION) return;
+
+  const latestHeight = Number(getIndexerState("last_processed_height") ?? 0);
+  const latestSeenHeight = Number(getIndexerState("latest_seen_height") ?? latestHeight);
+  const retentionStartHeight = estimateBackfillStart(latestSeenHeight, RETENTION_DAYS);
+
+  const coverage = getIndexedHeightCoverage(retentionStartHeight, latestHeight);
+  const indexedHeights = coverage
+    .filter((row) => row.status === "indexed")
+    .map((row) => row.height)
+    .sort((a, b) => b - a);
+
+  if (indexedHeights.length === 0) {
+    setIndexerState("data_version", String(INDEXER_DATA_VERSION));
+    return;
+  }
+
+  logInfo("Running data migration", { fromVersion: storedVersion, toVersion: INDEXER_DATA_VERSION, heightCount: indexedHeights.length });
+
+  for (let i = 0; i < indexedHeights.length; i += REPAIR_BATCH_SIZE) {
+    const batch = indexedHeights.slice(i, i + REPAIR_BATCH_SIZE);
+    await processRepairHeights(batch, REPAIR_CONCURRENCY, "data-migration");
+  }
+
+  setIndexerState("data_version", String(INDEXER_DATA_VERSION));
+  await rebuildIndexerCaches();
+  logInfo("Data migration complete", { version: INDEXER_DATA_VERSION, reprocessedHeights: indexedHeights.length });
+}
+
 async function runCatchup(options: IndexerOptions): Promise<void> {
   const latestHeight = options.toHeight ?? await getLatestHeight();
   const checkpoint = Number(getIndexerState("last_processed_height") ?? 0);
@@ -1268,6 +1336,7 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
     await syncServices();
     await syncSupplierDomains();
     await syncSessionData();
+    await runDataMigration();
     await runCatchup(options);
     pruneIndexerData(RETENTION_DAYS);
     finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt });

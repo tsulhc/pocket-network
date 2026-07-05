@@ -1,4 +1,5 @@
 import type { DashboardData, NetworkDailyHistoryPoint, ProviderStats, ServiceDailyHistoryPoint, ServiceStats, TimeWindow } from "@/lib/types";
+import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 
 const UPOKT = 1_000_000n;
 
@@ -100,6 +101,11 @@ export function getDevelopmentDashboardData(window: TimeWindow): DashboardData {
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
+    suppliersPerSession: SESSION_SUPPLIER_SLOTS,
+    appsStakedByService: Object.fromEntries(services.map((s) => [s.serviceId, s.providerCount])),
+    sessionSourceHeight: 812_338,
+    sessionFetchedAt: now.toISOString(),
+    sessionStale: false,
     providers,
     services
   };

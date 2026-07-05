@@ -110,7 +110,7 @@ export default async function RewardsPage() {
   const topOpportunityServices = [...data.services]
     .map((service) => ({
       service,
-      opportunity: buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS)
+      opportunity: buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS, { sessionSlots: data.suppliersPerSession, appsStaked: service.appsStaked })
     }))
     .sort((a, b) => b.opportunity.opportunityScore - a.opportunity.opportunityScore)
     .slice(0, 4);

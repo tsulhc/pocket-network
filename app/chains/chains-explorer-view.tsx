@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatPercent, formatUsd, formatUpokt } from "@/lib/format";
-import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS } from "@/lib/opportunities";
+import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS, SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import type { SerializedDashboardData, SerializedServiceStats } from "@/lib/types";
 
 type SortKey = "service" | "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "revenuePerProvider" | "opportunity";
@@ -46,11 +46,11 @@ function revenuePerProvider(service: SerializedServiceStats): number {
   return toPoktNumber(service.revenueUpokt) / Math.max(service.providerCount, 1);
 }
 
-function onboardingOpportunityScore(service: SerializedServiceStats): number {
-  return buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS).opportunityScore;
+function onboardingOpportunityScore(service: SerializedServiceStats, suppliersPerSession: number): number {
+  return buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS, { sessionSlots: suppliersPerSession, appsStaked: service.appsStaked }).opportunityScore;
 }
 
-function getSortValue(service: SerializedServiceStats, sort: SortKey): string | number | bigint {
+function getSortValue(service: SerializedServiceStats, sort: SortKey, suppliersPerSession: number): string | number | bigint {
   switch (sort) {
     case "service":
       return service.serviceName;
@@ -67,7 +67,7 @@ function getSortValue(service: SerializedServiceStats, sort: SortKey): string | 
     case "revenuePerProvider":
       return revenuePerProvider(service);
     case "opportunity":
-      return onboardingOpportunityScore(service);
+      return onboardingOpportunityScore(service, suppliersPerSession);
   }
 }
 
@@ -226,7 +226,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
         if (!normalizedQuery) return true;
         return [service.serviceName, service.serviceId].some((value) => value.toLowerCase().includes(normalizedQuery));
       })
-      .sort((a, b) => compareSortValue(getSortValue(a, sort), getSortValue(b, sort), sortDirection) || a.serviceName.localeCompare(b.serviceName));
+      .sort((a, b) => compareSortValue(getSortValue(a, sort, data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS), getSortValue(b, sort, data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS), sortDirection) || a.serviceName.localeCompare(b.serviceName));
   }, [data?.services, query, sort, sortDirection]);
   const topRevenueServices = [...(data?.services ?? [])]
     .sort(compareRevenueDesc)
@@ -295,7 +295,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
 
         <div className="explorer-summary-grid">
           {topRevenueServices.map((service, index) => {
-            const opportunity = buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS);
+            const opportunity = buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS, { sessionSlots: data.suppliersPerSession, appsStaked: service.appsStaked });
 
             return (
               <article key={service.serviceId} className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
@@ -450,7 +450,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
             </thead>
             <tbody>
               {services.map((service) => {
-                const opportunity = buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS);
+                const opportunity = buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS, { sessionSlots: data.suppliersPerSession, appsStaked: service.appsStaked });
 
                 return (
                 <tr key={service.serviceId}>

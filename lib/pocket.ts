@@ -2,6 +2,7 @@ import { cache } from "react";
 
 import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getMeta, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
 import { getDevelopmentDashboardData, getDevelopmentNetworkDailyHistory, getDevelopmentServiceDailyHistory, isDevelopmentDummyDataEnabled } from "@/lib/dev-fixtures";
+import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import { PROVIDER_DOMAIN_LABEL_OVERRIDES, SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
 import type {
   DashboardData,
@@ -1587,6 +1588,11 @@ function buildDashboardFromProviderRows(
     indexerTargetHeight?: number;
     earliestSettlementTime?: string | null;
     latestSettlementTime?: string | null;
+    suppliersPerSession?: number;
+    appsStakedByService?: Record<string, number>;
+    sessionSourceHeight?: number;
+    sessionFetchedAt?: string;
+    sessionStale?: boolean;
   }
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
@@ -1753,6 +1759,11 @@ function buildDashboardFromProviderRows(
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
+    suppliersPerSession: options?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS,
+    appsStakedByService: options?.appsStakedByService ?? {},
+    sessionSourceHeight: options?.sessionSourceHeight ?? 0,
+    sessionFetchedAt: options?.sessionFetchedAt ?? "",
+    sessionStale: options?.sessionStale ?? true,
     providers,
     services
   };
@@ -1764,7 +1775,14 @@ function buildDashboard(
   settlements: SettlementEvent[],
   serviceSupplierCounts: ServiceSupplierCounts,
   supplierDirectory: SupplierDirectory,
-  poktPriceUsd: number
+  poktPriceUsd: number,
+  sessionData?: {
+    suppliersPerSession?: number;
+    appsStakedByService?: Record<string, number>;
+    sessionSourceHeight?: number;
+    sessionFetchedAt?: string;
+    sessionStale?: boolean;
+  }
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
   const serviceMap = new Map<string, ServiceStats>();
@@ -1914,6 +1932,11 @@ function buildDashboard(
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
+    suppliersPerSession: sessionData?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS,
+    appsStakedByService: sessionData?.appsStakedByService ?? {},
+    sessionSourceHeight: sessionData?.sessionSourceHeight ?? 0,
+    sessionFetchedAt: sessionData?.sessionFetchedAt ?? "",
+    sessionStale: sessionData?.sessionStale ?? true,
     providers,
     services
   };
