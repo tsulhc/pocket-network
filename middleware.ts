@@ -16,9 +16,7 @@ export function middleware(request: NextRequest) {
 
   const queryToken = request.nextUrl.searchParams.get("auth");
   if (queryToken === ACCESS_TOKEN) {
-    const response = NextResponse.redirect(
-      request.nextUrl.pathname
-    );
+    const response = NextResponse.redirect(new URL("/", request.url));
     response.cookies.set(COOKIE_NAME, ACCESS_TOKEN, {
       httpOnly: true,
       secure: true,
