@@ -210,7 +210,7 @@ let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
-const INDEXER_DATA_VERSION = 2;
+const INDEXER_DATA_VERSION = 3;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
@@ -492,6 +492,16 @@ async function fetchBlockFacts(height: number, rpcUrls = RPC_URLS): Promise<Inde
   }
 
   return facts;
+}
+
+async function fetchBlockTimeMs(height: number, rpcUrls = RPC_URLS): Promise<number | null> {
+  try {
+    const block = await fetchFromRpcPool<RpcBlockResponse>(`/block?height=${height}`, height, rpcUrls);
+    const ts = Date.parse(block.result?.block?.header?.time ?? "");
+    return Number.isFinite(ts) ? ts : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseMaybeNumber(value: string | number | null | undefined): number | null {
@@ -973,7 +983,8 @@ async function fetchBlockFactsWithRetries(height: number, rpcUrls = RPC_URLS): P
 async function processHeight(height: number, rpcUrls = RPC_URLS): Promise<boolean> {
   try {
     const facts = await fetchBlockFactsWithRetries(height, rpcUrls);
-    saveIndexedBlock(height, facts);
+    const blockTime = facts.length > 0 ? facts[0].blockTime * 1000 : (await fetchBlockTimeMs(height, rpcUrls));
+    saveIndexedBlock(height, facts, blockTime ?? undefined);
     if (facts.length > 0) cacheDirty = true;
     return true;
   } catch (error) {
@@ -1025,7 +1036,7 @@ async function processRepairHeights(heights: number[], concurrency: number, sour
 
   for (const result of results.sort((a, b) => b.height - a.height)) {
     if (result.facts) {
-      saveIndexedBlock(result.height, result.facts);
+      saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime != null ? result.facts[0].blockTime * 1000 : undefined);
       repaired += 1;
       events += result.facts.length;
       if (result.facts.length > 0) cacheDirty = true;
@@ -1152,7 +1163,7 @@ async function processBackfillRange(fromHeight: number, toHeight: number, maxBlo
 
     for (const result of batchResults.sort((a, b) => b.height - a.height)) {
       if (result.facts) {
-        saveIndexedBlock(result.height, result.facts);
+        saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime != null ? result.facts[0].blockTime * 1000 : undefined);
         indexedEvents += result.facts.length;
         if (result.facts.length > 0) cacheDirty = true;
       } else {

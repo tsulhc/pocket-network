@@ -46,6 +46,9 @@ export type IndexedHeightCoverage = {
   failure_count: number;
   last_error: string | null;
   scanned_at: string;
+  block_time: number | null;
+  day: string | null;
+  source: string;
 };
 
 export type IndexedServiceAggregate = {
@@ -158,8 +161,8 @@ export function getIndexerHealth(): IndexerHealth {
 
   try {
     const dataVersion = getIndexerState("data_version");
-    const processedHeight = getIndexerState("last_processed_height");
-    const targetHeight = getIndexerState("latest_seen_height");
+    const processedHeight = getIndexerState("contiguous_processed_height");
+    const targetHeight = getIndexerState("highest_seen_height");
     let gaps = 0;
     let failedHeights = 0;
     try {
@@ -310,6 +313,16 @@ if (isReadOnly) {
   if (!hasLegacyColumn("relays")) {
     try { db.exec("ALTER TABLE settlement_facts ADD COLUMN relays INTEGER"); } catch { /* fallback */ }
   }
+
+  for (const alter of [
+    "ALTER TABLE indexed_heights ADD COLUMN block_time INTEGER",
+    "ALTER TABLE indexed_heights ADD COLUMN day TEXT",
+    "ALTER TABLE indexed_heights ADD COLUMN source TEXT NOT NULL DEFAULT 'rpc'",
+    "ALTER TABLE settlement_facts ADD COLUMN ingestion_source TEXT NOT NULL DEFAULT 'rpc'",
+    "ALTER TABLE settlement_facts ADD COLUMN source_record_id TEXT",
+  ]) {
+    try { db.exec(alter); } catch { /* column already exists */ }
+  }
 }
 
 const selectSettlementBlocksStatement = db.prepare(
@@ -446,36 +459,48 @@ const insertSettlementFactStatement = db.prepare(
 
 const upsertIndexedHeightStatement = db.prepare(
   `
-    INSERT INTO indexed_heights (height, status, scanned_at, event_count, failure_count, last_error)
-    VALUES (@height, @status, @scanned_at, @event_count, @failure_count, @last_error)
+    INSERT INTO indexed_heights (height, status, scanned_at, event_count, failure_count, last_error, block_time, day, source)
+    VALUES (@height, @status, @scanned_at, @event_count, @failure_count, @last_error, @block_time, @day, @source)
     ON CONFLICT(height) DO UPDATE SET
       status = excluded.status,
       scanned_at = excluded.scanned_at,
       event_count = excluded.event_count,
       failure_count = excluded.failure_count,
-      last_error = excluded.last_error
+      last_error = excluded.last_error,
+      block_time = COALESCE(excluded.block_time, indexed_heights.block_time),
+      day = COALESCE(excluded.day, indexed_heights.day),
+      source = excluded.source
   `
 );
 
 const markIndexedHeightFailedStatement = db.prepare(
   `
-    INSERT INTO indexed_heights (height, status, scanned_at, event_count, failure_count, last_error)
-    VALUES (@height, 'failed', @scanned_at, 0, 1, @last_error)
+    INSERT INTO indexed_heights (height, status, scanned_at, event_count, failure_count, last_error, source)
+    VALUES (@height, 'failed', @scanned_at, 0, 1, @last_error, @source)
     ON CONFLICT(height) DO UPDATE SET
       status = 'failed',
       scanned_at = excluded.scanned_at,
       failure_count = indexed_heights.failure_count + 1,
-      last_error = excluded.last_error
+      last_error = excluded.last_error,
+      source = excluded.source
   `
 );
 
 const selectIndexedHeightsStatement = db.prepare(
   `
-    SELECT height, status, event_count, failure_count, last_error, scanned_at
+    SELECT height, status, event_count, failure_count, last_error, scanned_at, block_time, day, source
     FROM indexed_heights
     WHERE height BETWEEN ? AND ?
     ORDER BY height ASC
   `
+);
+
+const checkHeightCoverageStatement = db.prepare(
+  "SELECT status FROM indexed_heights WHERE height = ?"
+);
+
+const checkGapHeightsStatement = db.prepare(
+  "SELECT height, status FROM indexed_heights WHERE height >= ? AND height <= ? ORDER BY height ASC"
 );
 
 const deleteOldSettlementFactsStatement = db.prepare("DELETE FROM settlement_facts WHERE block_time < ?");
@@ -608,7 +633,7 @@ const selectDailyRollupsStatement = db.prepare(
   `
 );
 
-const writeIndexedBlockTransaction = db.transaction((height: number, facts: IndexedSettlementFact[]) => {
+const writeIndexedBlockTransaction = db.transaction((height: number, facts: IndexedSettlementFact[], blockTime: number | null, day: string | null, source: string) => {
   for (const fact of facts) {
     insertSettlementFactStatement.run({
       height: fact.height,
@@ -633,16 +658,41 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
     scanned_at: new Date().toISOString(),
     event_count: facts.length,
     failure_count: 0,
-    last_error: null
+    last_error: null,
+    block_time: blockTime ?? null,
+    day: day ?? null,
+    source
   });
 
-  const current = Number((selectIndexerStateStatement.get("last_processed_height") as { value: string } | undefined)?.value ?? 0);
-  if (height > current) {
-    upsertIndexerStateStatement.run({
-      key: "last_processed_height",
-      value: String(height),
-      updated_at: new Date().toISOString()
-    });
+  setIndexerState("highest_seen_height", String(height));
+  setIndexerState("highest_ingested_height", String(height));
+
+  const currentContiguous = Number(getIndexerState("contiguous_processed_height") ?? 0);
+  if (height === currentContiguous + 1) {
+    let next = height;
+    while (true) {
+      const row = checkHeightCoverageStatement.get(next + 1) as { status: string } | undefined;
+      if (row && (row.status === "indexed" || row.status === "empty")) {
+        next += 1;
+      } else {
+        break;
+      }
+    }
+    setIndexerState("contiguous_processed_height", String(next));
+  } else if (height > currentContiguous) {
+    // Rebuild contiguous from base forward when advancing past current
+    const remaining = checkGapHeightsStatement.all(0, height) as Array<{ height: number; status: string }>;
+    let contiguous = 0;
+    for (const row of remaining) {
+      if (row.status === "indexed" || row.status === "empty") {
+        contiguous = Math.max(contiguous, row.height);
+      } else {
+        break;
+      }
+    }
+    if (contiguous > currentContiguous && contiguous >= height - 1) {
+      setIndexerState("contiguous_processed_height", String(Math.min(contiguous, height)));
+    }
   }
 });
 
@@ -736,16 +786,22 @@ export function setIndexerState(key: string, value: string): void {
   upsertIndexerStateStatement.run({ key, value, updated_at: new Date().toISOString() });
 }
 
-export function saveIndexedBlock(height: number, facts: IndexedSettlementFact[]): void {
-  writeIndexedBlockTransaction(height, facts);
+export function saveIndexedBlock(height: number, facts: IndexedSettlementFact[], blockTime?: number, source = "rpc"): void {
+  const day = blockTime != null ? new Date(blockTime * 1000).toISOString().slice(0, 10) : null;
+  writeIndexedBlockTransaction(height, facts, blockTime ?? null, day, source);
 }
 
-export function markIndexedHeightFailed(height: number, error: string): void {
+export function markIndexedHeightFailed(height: number, error: string, source = "rpc"): void {
   markIndexedHeightFailedStatement.run({
     height,
     scanned_at: new Date().toISOString(),
-    last_error: error.slice(0, 1000)
+    last_error: error.slice(0, 1000),
+    source
   });
+  const current = Number(getIndexerState("highest_seen_height") ?? 0);
+  if (height > current) {
+    setIndexerState("highest_seen_height", String(height));
+  }
 }
 
 export function getIndexedHeightCoverage(fromHeight: number, toHeight: number): IndexedHeightCoverage[] {
