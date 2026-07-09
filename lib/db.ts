@@ -89,20 +89,33 @@ export function acquireIndexerLock(): boolean {
   if (isReadOnly) return false;
   const lockfile = path.join(path.dirname(dbPath), "indexer.lock");
   try {
-    const existing = fs.existsSync(lockfile)
-      ? Number.parseInt(fs.readFileSync(lockfile, "utf-8").trim(), 10) || 0
-      : 0;
-    if (existing > 0) {
+    const fd = fs.openSync(lockfile, "wx");
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+    return true;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      // Lock exists — check if the owning process is still alive
       try {
-        process.kill(existing, 0);
-        return false;
+        const pidStr = fs.readFileSync(lockfile, "utf-8").trim();
+        const pid = Number.parseInt(pidStr, 10);
+        if (pid > 0) {
+          try {
+            process.kill(pid, 0);
+            return false; // alive, genuine lock holder
+          } catch {
+            // Stale lock — process is dead, take over
+            fs.unlinkSync(lockfile);
+            const fd2 = fs.openSync(lockfile, "wx");
+            fs.writeSync(fd2, String(process.pid));
+            fs.closeSync(fd2);
+            return true;
+          }
+        }
       } catch {
-        // Stale lock — process no longer running, safe to overwrite
+        // Can't read the lockfile — don't claim ownership
       }
     }
-    fs.writeFileSync(lockfile, String(process.pid), "utf-8");
-    return true;
-  } catch {
     return false;
   }
 }
@@ -169,7 +182,11 @@ export function getIndexerHealth(): IndexerHealth {
 let db: Database.Database;
 
 if (isReadOnly) {
+  if (!process.env.POCKET_SQLITE_PATH) {
+    throw new Error("POCKET_SQLITE_PATH must be set when POCKET_DB_READONLY=true");
+  }
   db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma("busy_timeout = 10000");
 } else {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   db = new Database(dbPath);
@@ -526,6 +543,14 @@ const selectGlobalRelayCoverageStatement = db.prepare(
   `
 );
 
+const selectGlobalComputeUnitCoverageStatement = db.prepare(
+  `
+    SELECT CAST(COALESCE(SUM(CASE WHEN estimated_compute_units IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS coverage
+    FROM settlement_facts
+    WHERE block_time >= ?
+  `
+);
+
 const selectServiceDailyAggregatesStatement = db.prepare(
   `
     SELECT
@@ -757,6 +782,11 @@ export function getIndexedProviderAggregates(sinceUnixMs: number): IndexedProvid
 
 export function getIndexedDailyAggregates(sinceUnixMs: number): IndexedDailyAggregate[] {
   return selectDailyAggregatesStatement.all(sinceUnixMs) as IndexedDailyAggregate[];
+}
+
+export function getGlobalComputeUnitCoverage(sinceUnixMs: number): number {
+  const row = selectGlobalComputeUnitCoverageStatement.get(sinceUnixMs) as { coverage: number } | undefined;
+  return row?.coverage ?? 0;
 }
 
 export function getGlobalRelayCoverage(sinceUnixMs: number): number {

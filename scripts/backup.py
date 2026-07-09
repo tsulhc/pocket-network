@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Online SQLite backup for Pocket Provider Dashboard.
 
-Creates a verified backup of the canonical SQLite database including WAL
-checkpoint. Uses sqlite3_backup API for safe concurrent backup during
-indexer operation.
+Creates a verified backup of the canonical SQLite database using the
+sqlite3_backup API. Does not VACUUM or checkpoint the source — those
+are maintenance operations that belong in a separate job.
 
 Usage:
     python3 scripts/backup.py [--db /var/lib/pocket-dashboard/pocket.sqlite]
@@ -17,80 +17,119 @@ import hashlib
 import os
 import sqlite3
 import sys
-import time
+
+MIN_RETENTION = 3
 
 
-def backup_database(source_path: str, backup_dir: str, retention_days: int) -> bool:
+def _validate_backup(path: str, source_facts: int) -> bool:
+    conn = sqlite3.connect(path)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA integrity_check")
+        row = cur.fetchone()
+        if not row or row[0] != "ok":
+            print(f"  integrity_check failed: {row}", file=sys.stderr)
+            return False
+        cur.execute("SELECT COUNT(*) FROM settlement_facts WHERE estimated_relays IS NOT NULL")
+        backup_facts = cur.fetchone()[0]
+        if backup_facts < source_facts:
+            print(f"  Backup has fewer estimated facts ({backup_facts}) than source ({source_facts})",
+                  file=sys.stderr)
+            return False
+        cur.execute("SELECT value FROM indexer_state WHERE key='data_version'")
+        row = cur.fetchone()
+        if not row:
+            print("  Backup missing data_version in indexer_state", file=sys.stderr)
+            return False
+        return True
+    finally:
+        conn.close()
+
+
+def _record_metadata(source_path: str, timestamp: str) -> None:
+    conn = sqlite3.connect(source_path)
+    try:
+        conn.execute(
+            "INSERT INTO indexer_state (key, value, updated_at) VALUES ('last_backup', ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (timestamp, datetime.datetime.utcnow().isoformat() + "Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def backup_database(source_path: str, backup_dir: str, retention: int) -> bool:
+    if retention < MIN_RETENTION:
+        print(f"Retention must be at least {MIN_RETENTION}, got {retention}", file=sys.stderr)
+        return False
+
     os.makedirs(backup_dir, exist_ok=True)
 
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    backup_path = os.path.join(backup_dir, f"pocket-{timestamp}.sqlite")
-    tmp_path = backup_path + ".tmp"
+    final_path = os.path.join(backup_dir, f"pocket-{timestamp}.sqlite")
+    tmp_path = final_path + ".tmp"
+    checksum_tmp = final_path + ".sha256.tmp"
+    checksum_final = final_path + ".sha256"
 
-    if os.path.exists(tmp_path):
-        os.unlink(tmp_path)
+    for stale in (tmp_path, checksum_tmp):
+        if os.path.exists(stale):
+            os.unlink(stale)
 
     try:
         source = sqlite3.connect(source_path)
-        source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        cur = source.cursor()
+        cur.execute("SELECT COUNT(*) FROM settlement_facts WHERE estimated_relays IS NOT NULL")
+        source_facts = cur.fetchone()[0]
+        cur.execute("SELECT value FROM indexer_state WHERE key='data_version'")
+        ver_row = cur.fetchone()
+        if not ver_row:
+            source.close()
+            print("Source database missing data_version; cannot backup", file=sys.stderr)
+            return False
 
         dest = sqlite3.connect(tmp_path)
         source.backup(dest)
         dest.close()
+        source.close()
 
         sha = hashlib.sha256()
         with open(tmp_path, "rb") as f:
             while True:
-                chunk = f.read(8192)
+                chunk = f.read(1 << 20)
                 if not chunk:
                     break
                 sha.update(chunk)
+        digest = sha.hexdigest()
 
-        checksum_path = tmp_path + ".sha256"
-        with open(checksum_path, "w") as c:
-            c.write(f"{sha.hexdigest()}  {os.path.basename(backup_path)}\n")
+        if not _validate_backup(tmp_path, source_facts):
+            os.unlink(tmp_path)
+            return False
 
-        os.rename(tmp_path, backup_path)
+        with open(checksum_tmp, "w") as c:
+            c.write(f"{digest}  {os.path.basename(final_path)}\n")
 
-        size_mb = os.path.getsize(backup_path) / (1024 * 1024)
-        print(f"[{datetime.datetime.utcnow().isoformat()}Z] Backup complete: {os.path.basename(backup_path)} ({size_mb:.1f} MB, sha256={sha.hexdigest()[:16]}...)")
+        os.rename(tmp_path, final_path)
+        os.rename(checksum_tmp, checksum_final)
 
-        source.execute("VACUUM")
-        source.close()
+        size_mb = os.path.getsize(final_path) / (1024 * 1024)
+        print(f"[{datetime.datetime.utcnow().isoformat()}Z] Backup verified: "
+              f"{os.path.basename(final_path)} ({size_mb:.1f} MB, sha256={digest[:16]}...)")
 
-        # Verify backup
-        verify = sqlite3.connect(backup_path)
-        verify.execute("PRAGMA integrity_check")
-        rows = verify.execute(
-            "SELECT COUNT(*) FROM settlement_facts WHERE estimated_relays IS NOT NULL"
-        ).fetchone()
-        if rows:
-            print(f"  Verified: {rows[0]} estimated facts in backup")
-        verify.close()
+        _record_metadata(source_path, timestamp)
 
-        # Retention cleanup
         backups = sorted(
-            [f for f in os.listdir(backup_dir) if f.startswith("pocket-") and f.endswith(".sqlite")],
+            [f for f in os.listdir(backup_dir)
+             if f.startswith("pocket-") and f.endswith(".sqlite")],
             reverse=True,
         )
-        for old in backups[retention_days:]:
+        for old in backups[retention:]:
             old_path = os.path.join(backup_dir, old)
+            old_checksum = old_path + ".sha256"
             os.unlink(old_path)
+            if os.path.exists(old_checksum):
+                os.unlink(old_checksum)
             print(f"  Rotated: {old}")
-
-        # Update metadata
-        import subprocess
-        try:
-            subprocess.run(
-                ["python3", "-c",
-                 f"import sqlite3; c=sqlite3.connect('{source_path}');"
-                 f"c.execute(\"INSERT INTO indexer_state (key,value,updated_at) VALUES ('last_backup',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at\","
-                 f"('{timestamp}','{datetime.datetime.utcnow().isoformat()}Z'));"
-                 f"c.commit(); c.close()"],
-                capture_output=True, timeout=10,
-            )
-        except Exception:
-            pass
 
         return True
 
@@ -98,6 +137,8 @@ def backup_database(source_path: str, backup_dir: str, retention_days: int) -> b
         print(f"Backup failed: {exc}", file=sys.stderr)
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        if os.path.exists(checksum_tmp):
+            os.unlink(checksum_tmp)
         return False
 
 
@@ -105,7 +146,7 @@ def main():
     parser = argparse.ArgumentParser(description="Online SQLite backup for Pocket Provider Dashboard")
     parser.add_argument(
         "--db",
-        default=os.environ.get("POCKET_SQLITE_PATH", "/var/lib/pocket-dashboard/pocket.sqlite"),
+        default=os.environ.get("POCKET_SQLITE_PATH", ""),
         help="Path to source SQLite database",
     )
     parser.add_argument(
@@ -113,14 +154,15 @@ def main():
         default=os.environ.get("POCKET_BACKUP_DIR", "/var/backups/pocket-dashboard"),
         help="Directory to store backup files",
     )
-    parser.add_argument("--retention", type=int, default=7, help="Number of backup generations to retain")
+    parser.add_argument("--retention", type=int, default=7, help="Number of backup generations to retain (min 3)")
     args = parser.parse_args()
 
-    if not os.path.exists(args.db):
-        print(f"Database not found: {args.db}", file=sys.stderr)
+    db_path = args.db or "/var/lib/pocket-dashboard/pocket.sqlite"
+    if not os.path.exists(db_path):
+        print(f"Database not found: {db_path}", file=sys.stderr)
         sys.exit(1)
 
-    success = backup_database(args.db, args.backup_dir, args.retention)
+    success = backup_database(db_path, args.backup_dir, args.retention)
     sys.exit(0 if success else 1)
 
 

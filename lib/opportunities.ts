@@ -124,7 +124,18 @@ export function buildProviderServiceOpportunity(
   const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
   const selectionProbability = getSelectionProbability(supplierCount, providerSupplierCount, sessionSlots);
   const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
-  const opportunityScore = projectedRevenuePerSupplierPokt * (0.65 + (selectionProbability / 100) * 0.35);
+
+  let appComponent = 0;
+  if (options?.appsStaked != null && options.appsStaked > 0) {
+    const expectedAssignments = getExpectedAssignments(options.appsStaked, sessionSlots, providerSupplierCount, totalSuppliers);
+    const maxAssignments = providerSupplierCount * sessionSlots;
+    if (maxAssignments > 0 && expectedAssignments > 0) {
+      const normalized = expectedAssignments / maxAssignments;
+      appComponent = Math.log2(1 + normalized) * 0.15;
+    }
+  }
+
+  const opportunityScore = projectedRevenuePerSupplierPokt * (0.55 + (selectionProbability / 100) * 0.30 + appComponent);
 
   const result: ProviderServiceOpportunity = {
     serviceId: service.serviceId,
