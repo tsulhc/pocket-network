@@ -108,7 +108,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
             </div>
           </div>
 
-          <div className="network-trend-chart" aria-label="Network revenue and workload trend chart">
+          <div className="network-trend-chart" aria-label="Network revenue and workload trend chart" style={{ gridTemplateColumns: `repeat(${trendPoints.length}, 1fr)` }}>
             <div className="network-trend-gridlines" aria-hidden="true">
               <span />
               <span />
