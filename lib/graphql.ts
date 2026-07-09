@@ -89,11 +89,12 @@ type BlocksResponse = {
   };
 };
 
-const BLOCKS_QUERY = `query($from: BigInt!, $to: BigInt!) {
+const BLOCKS_QUERY = `query($from: BigInt!, $to: BigInt!, $cursor: Cursor) {
   blocks(
     filter: { height: { greaterThanOrEqualTo: $from, lessThanOrEqualTo: $to } }
     orderBy: HEIGHT_ASC
     first: 500
+    after: $cursor
   ) {
     nodes {
       height
@@ -110,14 +111,17 @@ const BLOCKS_QUERY = `query($from: BigInt!, $to: BigInt!) {
           claimedAmount
           settledAmount
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
+    pageInfo { hasNextPage endCursor }
   }
 }`;
 
 export type FetchBlocksResult = {
   settlements: IndexedGraphQLSettlement[];
   blocksFound: Set<number>;
+  blockTimeByHeight: Map<number, number>;
 };
 
 export async function fetchSettlementsByBlockRange(
@@ -126,19 +130,34 @@ export async function fetchSettlementsByBlockRange(
 ): Promise<FetchBlocksResult> {
   const results: IndexedGraphQLSettlement[] = [];
   const blocksFound = new Set<number>();
+  const blockTimeByHeight = new Map<number, number>();
   let from = fromHeight;
 
   while (from <= toHeight) {
     const batchTo = Math.min(from + 200, toHeight);
 
-    const data = await fetchGraphQL<BlocksResponse>(BLOCKS_QUERY, { from: String(from), to: String(batchTo) });
+    const data = await fetchGraphQL<BlocksResponse>(BLOCKS_QUERY, {
+      from: String(from),
+      to: String(batchTo),
+      cursor: null,
+    });
     for (const block of data.blocks.nodes) {
+      const nested = block.eventClaimSettledsByBlockId;
+      if (nested.pageInfo?.hasNextPage) {
+        // Block has more than 500 settlement events — don't process it, the
+        // repair will retry via RPC or we'll need cursor pagination here too
+        continue;
+      }
       const blockTime = Date.parse(block.header?.time ?? "");
-      blocksFound.add(Number(block.height));
+      const height = Number(block.height);
+      blocksFound.add(height);
+      if (Number.isFinite(blockTime) && blockTime > 0) {
+        blockTimeByHeight.set(height, blockTime);
+      }
       for (const node of block.eventClaimSettledsByBlockId.nodes) {
         results.push({
           id: node.id,
-          blockHeight: Number(block.height),
+          blockHeight: height,
           blockTime: Number.isFinite(blockTime) ? blockTime : 0,
           serviceId: node.serviceId,
           supplierId: node.supplierId,
@@ -154,7 +173,7 @@ export async function fetchSettlementsByBlockRange(
     from = batchTo + 1;
   }
 
-  return { settlements: results, blocksFound };
+  return { settlements: results, blocksFound, blockTimeByHeight };
 }
 
 export async function updateGraphQLWatermark(): Promise<void> {

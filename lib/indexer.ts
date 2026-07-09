@@ -824,7 +824,7 @@ function buildCalendarDailyHistory(
     const row = rowByDay.get(day);
     const cov = dayCoverage.get(day);
     if (!row) {
-      const completeness: "complete" | "partial" | "missing" = cov && cov.totalHeights > 0 ? "complete" : "missing";
+      const completeness: "complete" | "partial" | "missing" = cov && cov.coverage >= 1 && cov.totalHeights > 0 ? "complete" : "missing";
       result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", completeness });
       continue;
     }
@@ -1343,27 +1343,15 @@ async function runDataMigration(): Promise<void> {
   logInfo("Backfilling block_time/day for empty indexed heights");
   backfillEmptyHeightMetadata();
 
-  // Seed contiguous from legacy checkpoint — the migration reprocessed all
-  // retained heights. The writeIndexedBlockTransaction already advances
-  // contiguous through confirmed gaps. If no legacy checkpoint exists,
-  // scan from 1 to find the actual boundary.
+  // Seed contiguous — scan upward from retention start and stop at the
+  // first missing or failed height. The contiguous value is the last
+  // verified height before that gap.
   const currentContiguous = Number(getIndexerState("contiguous_processed_height") ?? 0);
   if (currentContiguous === 0) {
     const legacy = Number(legacyVal ?? 0);
     if (legacy > 0) {
-      // Start from the legacy high-water mark and scan backward to find
-      // the first gap, then forward to confirm contiguous coverage
       let contiguous = 0;
-      for (let h = legacy; h > 0; h -= 1) {
-        const coverage = getIndexedHeightCoverage(h, h);
-        const row = coverage[0];
-        if (row && (row.status === "indexed" || row.status === "empty")) {
-          contiguous = h;
-        } else {
-          break;
-        }
-      }
-      for (let h = contiguous + 1; h <= legacy; h += 1) {
+      for (let h = retentionStartHeight; h <= legacy; h += 1) {
         const coverage = getIndexedHeightCoverage(h, h);
         const row = coverage[0];
         if (row && (row.status === "indexed" || row.status === "empty")) {
@@ -1373,7 +1361,7 @@ async function runDataMigration(): Promise<void> {
         }
       }
       setIndexerState("contiguous_processed_height", String(contiguous));
-      logInfo("Seeded contiguous checkpoint from legacy", { legacy, contiguous });
+      logInfo("Seeded contiguous checkpoint from legacy", { legacy, retentionStartHeight, contiguous });
     }
   }
 

@@ -1,6 +1,7 @@
 import {
   saveIndexedBlock,
   getFailedHeights,
+  getEmptyNullTimestampHeights,
   type IndexedSettlementFact
 } from "@/lib/db";
 import {
@@ -40,9 +41,9 @@ function graphQLSettlementToFact(event: {
     relays: event.numRelays,
     estimatedRelays: event.numEstimatedRelays > 0 ? event.numEstimatedRelays : undefined,
     estimatedComputeUnits: event.numEstimatedComputeUnits > 0 ? event.numEstimatedComputeUnits : undefined,
-    revenueUpokt: upokt,
+    revenueUpokt: "0", // GraphQL rewards must be reconciled before contributing to totals
     ingestionSource: "graphql",
-    sourceRecordId: event.id,
+    sourceRecordId: JSON.stringify({ graphqlId: event.id, claimedAmount: event.claimedAmount, settledAmount: event.settledAmount }),
   };
 }
 
@@ -56,14 +57,14 @@ async function repairHeightViaGraphQL(height: number): Promise<number> {
     const result = await fetchSettlementsByBlockRange(height, height);
     if (result.settlements.length === 0) {
       if (result.blocksFound.has(height)) {
-        // Block exists in GraphQL but has no settlement events → truly empty
-        saveIndexedBlock(height, [], undefined, "graphql");
+        const blockTime = result.blockTimeByHeight.get(height);
+        saveIndexedBlock(height, [], blockTime, "graphql");
         return 0;
       }
-      return -1; // Block not found in GraphQL, not yet indexed
+      return -1;
     }
     const facts = result.settlements.map((event, index) => graphQLSettlementToFact(event, index));
-    const blockTime = result.settlements[0].blockTime;
+    const blockTime = result.settlements[0].blockTime || result.blockTimeByHeight.get(height);
     saveIndexedBlock(height, facts, blockTime, "graphql");
     return result.settlements.length;
   } catch {
@@ -75,14 +76,16 @@ export async function graphQLRepairFailedHeights(): Promise<{ repaired: number; 
   const healthy = await isGraphQLHealthy();
   if (!healthy) return { repaired: 0, failed: 0, events: 0 };
 
-  const failedHeights = getFailedHeights(100);
-  if (failedHeights.length === 0) return { repaired: 0, failed: 0, events: 0 };
+  const failedHeights = getFailedHeights(50);
+  const emptyNullHeights = getEmptyNullTimestampHeights(50);
+  const targetHeights = [...new Set([...failedHeights, ...emptyNullHeights])].sort((a, b) => b - a);
+  if (targetHeights.length === 0) return { repaired: 0, failed: 0, events: 0 };
 
   let repaired = 0;
   let failed = 0;
   let events = 0;
 
-  for (const height of failedHeights) {
+  for (const height of targetHeights) {
     const result = await repairHeightViaGraphQL(height);
     if (result >= 0) {
       repaired += 1;

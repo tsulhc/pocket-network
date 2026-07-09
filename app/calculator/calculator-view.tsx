@@ -26,16 +26,14 @@ export default function CalculatorView({ data }: { data: SerializedDashboardData
 
   return (
     <main className="page">
-      <section className="panel section themed section-theme-revenue">
-        <RevenueCalculator
-          poktPriceUsd={data.poktPriceUsd}
-          services={services}
-          suppliersPerSession={data.suppliersPerSession}
-          sessionObservedHeight={data.sessionObservedHeight}
-          sessionFetchedAt={data.sessionFetchedAt}
-          sessionStale={data.sessionStale}
-        />
-      </section>
+      <RevenueCalculator
+        poktPriceUsd={data.poktPriceUsd}
+        services={services}
+        suppliersPerSession={data.suppliersPerSession}
+        sessionObservedHeight={data.sessionObservedHeight}
+        sessionFetchedAt={data.sessionFetchedAt}
+        sessionStale={data.sessionStale}
+      />
     </main>
   );
 }

@@ -21,6 +21,7 @@ export async function GET() {
       lag,
       gaps: health.gaps,
       failedHeights: health.failedHeights,
+      emptyNullTimestamps: health.emptyNullTimestamps,
       lastSuccessfulCommit: health.lastSuccessfulCommit,
       lastBackup: health.lastBackup,
     },

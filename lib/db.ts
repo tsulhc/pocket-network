@@ -148,6 +148,7 @@ export type IndexerHealth = {
   isLocked: boolean;
   gaps: number;
   failedHeights: number;
+  emptyNullTimestamps: number;
 };
 
 export function getIndexerHealth(): IndexerHealth {
@@ -167,10 +168,12 @@ export function getIndexerHealth(): IndexerHealth {
     const targetHeight = getIndexerState("highest_seen_height");
     let gaps = 0;
     let failedHeights = 0;
+    let emptyNullTimestamps = 0;
     try {
       const gapRow = selectGapCountStatement.get() as { gaps: number; failed: number } | undefined;
       if (gapRow) { gaps = gapRow.gaps; failedHeights = gapRow.failed; }
-    } catch { /* gaps query may not be available on older schema */ }
+      emptyNullTimestamps = getEmptyNullTimestampCount();
+    } catch { /* queries may not be available on older schema */ }
     return {
       schemaVersion: getMeta("schema_version") ?? null,
       dataVersion: dataVersion ?? null,
@@ -181,6 +184,7 @@ export function getIndexerHealth(): IndexerHealth {
       isLocked,
       gaps,
       failedHeights,
+      emptyNullTimestamps,
     };
   } catch {
     return {
@@ -193,6 +197,7 @@ export function getIndexerHealth(): IndexerHealth {
       isLocked,
       gaps: 0,
       failedHeights: 0,
+      emptyNullTimestamps: 0,
     };
   }
 }
@@ -513,6 +518,14 @@ const checkGapHeightsStatement = db.prepare(
 
 const selectFailedHeightsStatement = db.prepare(
   "SELECT height FROM indexed_heights WHERE status = 'failed' ORDER BY failure_count ASC, height DESC LIMIT ?"
+);
+
+const selectEmptyNullTimestampStatement = db.prepare(
+  "SELECT height FROM indexed_heights WHERE status = 'empty' AND block_time IS NULL ORDER BY height ASC LIMIT ?"
+);
+
+const countEmptyNullTimestampStatement = db.prepare(
+  "SELECT COUNT(*) AS count FROM indexed_heights WHERE status = 'empty' AND block_time IS NULL"
 );
 
 const selectDayCoverageStatement = db.prepare(
@@ -871,6 +884,23 @@ export function getMaxDayHeights(): number {
   }
 }
 
+export function getEmptyNullTimestampHeights(limit = 100): number[] {
+  try {
+    const rows = selectEmptyNullTimestampStatement.all(limit) as Array<{ height: number }>;
+    return rows.map((r) => r.height);
+  } catch {
+    return [];
+  }
+}
+
+export function getEmptyNullTimestampCount(): number {
+  try {
+    const row = countEmptyNullTimestampStatement.get() as { count: number } | undefined;
+    return row?.count ?? 0;
+  } catch {
+    return 0;
+  }
+}
 export function getFailedHeights(limit = 100): number[] {
   try {
     const rows = selectFailedHeightsStatement.all(limit) as Array<{ height: number }>;
