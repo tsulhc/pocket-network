@@ -141,16 +141,16 @@ export function getIndexerHealth(): IndexerHealth {
   } catch { /* ignored */ }
 
   try {
-    const dataVersion = getMeta("data_version");
-    const processedHeight = getMeta("last_processed_height");
-    const targetHeight = getMeta("latest_network_height");
+    const dataVersion = getIndexerState("data_version");
+    const processedHeight = getIndexerState("last_processed_height");
+    const targetHeight = getIndexerState("latest_network_height");
     return {
-      schemaVersion: getMeta("indexer_data_version") ?? null,
+      schemaVersion: getMeta("schema_version") ?? null,
       dataVersion: dataVersion ?? null,
       processedHeight: processedHeight ? Number.parseInt(processedHeight, 10) || null : null,
       targetHeight: targetHeight ? Number.parseInt(targetHeight, 10) || null : null,
-      lastSuccessfulCommit: getMeta("last_successful_commit") ?? null,
-      lastBackup: getMeta("last_backup") ?? null,
+      lastSuccessfulCommit: getIndexerState("last_successful_commit") ?? null,
+      lastBackup: getIndexerState("last_backup") ?? null,
       isLocked,
     };
   } catch {
