@@ -527,6 +527,10 @@ const selectDayCoverageStatement = db.prepare(
   `
 );
 
+const selectMaxDayHeightsStatement = db.prepare(
+  "SELECT MAX(cnt) AS max_count FROM (SELECT COUNT(*) AS cnt FROM indexed_heights WHERE day IS NOT NULL AND status IN ('indexed', 'empty') GROUP BY day)"
+);
+
 const selectEmptyHeightsWithoutMetadataStatement = db.prepare(
   "SELECT ih.height, sb.block_time FROM indexed_heights ih JOIN settlement_blocks sb ON sb.height = ih.height WHERE ih.status = 'empty' AND ih.block_time IS NULL ORDER BY ih.height LIMIT ?"
 );
@@ -708,19 +712,19 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
   }
 
   const currentContiguous = Number(getIndexerState("contiguous_processed_height") ?? 0);
-  if (height === currentContiguous + 1) {
-    let next = height;
-    while (true) {
-      const row = checkHeightCoverageStatement.get(next + 1) as { status: string } | undefined;
-      if (row && (row.status === "indexed" || row.status === "empty")) {
-        next += 1;
-      } else {
-        break;
-      }
+  // Scan forward from current contiguous boundary, advancing through
+  // every consecutive indexed|empty height
+  let next = currentContiguous;
+  while (true) {
+    const row = checkHeightCoverageStatement.get(next + 1) as { status: string } | undefined;
+    if (row && (row.status === "indexed" || row.status === "empty")) {
+      next += 1;
+    } else {
+      break;
     }
+  }
+  if (next > currentContiguous) {
     setIndexerState("contiguous_processed_height", String(next));
-  } else if (height > currentContiguous) {
-    setIndexerState("contiguous_processed_height", String(Math.max(currentContiguous, height)));
   }
 });
 
@@ -852,6 +856,15 @@ export function getDayCoverage(blocksPerDay: number): Array<{ day: string; cover
     return selectDayCoverageStatement.all(blocksPerDay) as Array<{ day: string; coverage: number; total: number }>;
   } catch {
     return [];
+  }
+}
+
+export function getMaxDayHeights(): number {
+  try {
+    const row = selectMaxDayHeightsStatement.get() as { max_count: number } | undefined;
+    return row?.max_count ?? 1440;
+  } catch {
+    return 1440;
   }
 }
 

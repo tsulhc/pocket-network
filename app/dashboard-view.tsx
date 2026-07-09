@@ -43,19 +43,32 @@ function compareRevenueDesc<T extends { revenueUpokt: string }>(a: T, b: T): num
   return bRevenue > aRevenue ? 1 : -1;
 }
 
-function buildNetworkTrendPath(points: Array<{ revenue: number; completeness?: string }>, maxRevenue: number): string {
-  if (points.length === 0 || maxRevenue === 0) return "";
-  const visible = points.filter((p) => p.completeness !== "missing");
+function buildNetworkTrendPaths(points: Array<{ revenue: number; completeness?: string }>, maxRevenue: number): string[] {
+  if (points.length === 0 || maxRevenue === 0) return [];
 
-  if (visible.length === 0) return "";
+  const segments: Array<Array<{ revenue: number }>> = [];
+  let current: Array<{ revenue: number }> = [];
+  for (const point of points) {
+    if (point.completeness === "missing") {
+      if (current.length > 0) { segments.push(current); current = []; }
+    } else {
+      current.push(point);
+    }
+  }
+  if (current.length > 0) segments.push(current);
 
-  return visible
-    .map((point, index) => {
-      const x = visible.length === 1 ? 50 : (index / (visible.length - 1)) * 100;
+  if (segments.length === 0) return [];
+
+  // Each segment maps its own x-coordinates within the full width
+  const total = points.length;
+  return segments.map((segment) => {
+    return segment.map((point, index) => {
+      const globalIndex = points.indexOf(point);
+      const x = total === 1 ? 50 : (globalIndex / (total - 1)) * 100;
       const y = 100 - (Math.max(0, point.revenue) / maxRevenue) * 100;
       return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
+    }).join(" ");
+  });
 }
 
 function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistoryPoint[] }) {
@@ -78,7 +91,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
   const latestPoint = trendPoints.at(-1);
   const totalRevenue = trendPoints.reduce((sum, point) => sum + point.revenue, 0);
   const totalCULoad = trendPoints.reduce((sum, point) => sum + point.cuLoad, 0);
-  const linePath = buildNetworkTrendPath(trendPoints, maxRevenue);
+  const linePaths = buildNetworkTrendPaths(trendPoints, maxRevenue);
   const hasData = trendPoints.some((point) => point.revenue > 0 || point.cuLoad > 0);
 
   return (
@@ -121,7 +134,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
               <span />
             </div>
             <svg className="network-trend-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-              <path d={linePath} />
+              {linePaths.map((d, i) => <path key={i} d={d} />)}
             </svg>
             {trendPoints.map((point) => {
               const isMissing = point.completeness === "missing";

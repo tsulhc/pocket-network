@@ -16,6 +16,7 @@ import {
   getGlobalComputeUnitCoverage,
   getLatestIndexedFact,
   getDayCoverage,
+  getMaxDayHeights,
   getEmptyHeightsWithoutMetadata,
   updateHeightMetadata,
   markIndexedHeightFailed,
@@ -393,6 +394,8 @@ function parseUpokt(value: string): bigint {
 function hashIdentity(value: string): string {
   return crypto.createHash("sha256").update(`${HASH_SALT}:${value}`).digest("hex").slice(0, 32);
 }
+
+export { hashIdentity };
 
 function getHostname(url: string): string | null {
   try {
@@ -821,7 +824,7 @@ function buildCalendarDailyHistory(
     const row = rowByDay.get(day);
     const cov = dayCoverage.get(day);
     if (!row) {
-      const completeness: "complete" | "partial" | "missing" = cov?.coverage === 1 ? "missing" : "missing";
+      const completeness: "complete" | "partial" | "missing" = cov && cov.totalHeights > 0 ? "complete" : "missing";
       result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", completeness });
       continue;
     }
@@ -838,10 +841,11 @@ function buildCalendarDailyHistory(
 
 function getDayCoverageMap(): Map<string, { coverage: number; totalHeights: number }> {
   try {
-    const rows = getDayCoverage(1440);
+    const blocksPerDay = Math.max(1, getMaxDayHeights());
+    const rows = getDayCoverage(blocksPerDay);
     const map = new Map<string, { coverage: number; totalHeights: number }>();
     for (const r of rows) {
-      if (r.day) map.set(r.day, { coverage: r.coverage, totalHeights: r.total });
+      if (r.day) map.set(r.day, { coverage: Math.min(1, r.coverage), totalHeights: r.total });
     }
     return map;
   } catch {
@@ -1091,7 +1095,7 @@ async function processRepairHeights(heights: number[], concurrency: number, sour
 
   for (const result of results.sort((a, b) => b.height - a.height)) {
     if (result.facts) {
-      saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime != null ? result.facts[0].blockTime * 1000 : undefined);
+            saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime ?? undefined);;
       repaired += 1;
       events += result.facts.length;
       if (result.facts.length > 0) cacheDirty = true;
@@ -1148,6 +1152,21 @@ async function runRepairLoop(): Promise<void> {
       }
     } catch (error) {
       logError("Repair loop failed", error);
+    }
+
+    if (graphQLCycleCounter % GRAPHQL_REPAIR_INTERVAL === 0) {
+      try {
+        await updateGraphQLWatermark();
+        const gqlResult = await graphQLRepairFailedHeights();
+        if (gqlResult.repaired > 0 || gqlResult.failed > 0) {
+          logInfo("GraphQL repair summary", gqlResult);
+          if (gqlResult.repaired > 0) {
+            await maybeRebuildCaches();
+          }
+        }
+      } catch (error) {
+        logError("GraphQL repair cycle failed", error);
+      }
     }
 
     await sleep(REPAIR_INTERVAL_MS);
@@ -1221,7 +1240,7 @@ async function processBackfillRange(fromHeight: number, toHeight: number, maxBlo
 
     for (const result of batchResults.sort((a, b) => b.height - a.height)) {
       if (result.facts) {
-        saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime != null ? result.facts[0].blockTime * 1000 : undefined);
+              saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime ?? undefined);;
         indexedEvents += result.facts.length;
         if (result.facts.length > 0) cacheDirty = true;
       } else {
@@ -1259,14 +1278,20 @@ function estimateBackfillStart(latestHeight: number, days: number): number {
 
 function backfillEmptyHeightMetadata(): void {
   try {
-    const rows = getEmptyHeightsWithoutMetadata(1000);
-    for (const row of rows) {
-      const day = new Date(row.blockTime).toISOString().slice(0, 10);
-      updateHeightMetadata(row.height, row.blockTime, day);
+    let total = 0;
+    while (true) {
+      const rows = getEmptyHeightsWithoutMetadata(5000);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const day = new Date(row.blockTime).toISOString().slice(0, 10);
+        updateHeightMetadata(row.height, row.blockTime, day);
+      }
+      total += rows.length;
     }
-    logInfo("Empty height metadata backfill complete", { count: rows.length });
+    logInfo("Empty height metadata backfill complete", { count: total });
   } catch (error) {
     logError("Empty height metadata backfill failed", error);
+    throw error;
   }
 }
 
@@ -1274,18 +1299,20 @@ async function runDataMigration(): Promise<void> {
   const storedVersion = Number(getIndexerState("data_version") ?? "0");
   if (storedVersion >= INDEXER_DATA_VERSION) return;
 
-  const latestHeight = Number(getIndexerState("contiguous_processed_height") ?? 0);
-  const latestSeenHeight = Number(getIndexerState("highest_seen_height") ?? latestHeight);
+  const contiguousVal = getIndexerState("contiguous_processed_height");
+  const legacyVal = getIndexerState("last_processed_height");
+  const latestHeight = Number(contiguousVal ?? legacyVal ?? 0);
+  const latestSeenHeight = Number(getIndexerState("highest_seen_height") ?? getIndexerState("latest_seen_height") ?? latestHeight);
   const retentionStartHeight = estimateBackfillStart(latestSeenHeight, RETENTION_DAYS);
 
-  const coverage = getIndexedHeightCoverage(retentionStartHeight, latestHeight);
+  const coverage = getIndexedHeightCoverage(retentionStartHeight, latestSeenHeight);
   const indexedHeights = coverage
     .filter((row) => row.status === "indexed")
     .map((row) => row.height)
     .sort((a, b) => b - a);
 
   if (indexedHeights.length === 0) {
-    setIndexerState("data_version", String(INDEXER_DATA_VERSION));
+    logWarn("Data migration found no indexed heights to reprocess; cannot advance version", { fromVersion: storedVersion, toVersion: INDEXER_DATA_VERSION });
     return;
   }
 

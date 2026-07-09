@@ -6,12 +6,9 @@ import {
 import {
   fetchSettlementsByBlockRange,
   isGraphQLHealthy,
+  fetchGraphQLMetadata,
 } from "@/lib/graphql";
-
-function hashIdentity(id: string): string {
-  const crypto = require("node:crypto") as typeof import("node:crypto");
-  return crypto.createHash("sha256").update(id, "utf-8").digest("hex").slice(0, 16);
-}
+import { hashIdentity } from "@/lib/indexer";
 
 function graphQLSettlementToFact(event: {
   id: string;
@@ -51,8 +48,14 @@ function graphQLSettlementToFact(event: {
 
 async function repairHeightViaGraphQL(height: number): Promise<number> {
   try {
+    const meta = await fetchGraphQLMetadata();
+    if (!meta || meta.lastFinalizedVerifiedHeight == null || height > meta.lastFinalizedVerifiedHeight) {
+      return -1; // GraphQL hasn't finalized this height
+    }
+
     const events = await fetchSettlementsByBlockRange(height, height);
     if (events.length === 0) {
+      // Block exists in GraphQL but has no settlement events → truly empty
       saveIndexedBlock(height, [], undefined, "graphql");
       return 0;
     }
