@@ -801,6 +801,38 @@ async function refreshPrice(): Promise<number> {
   return getCachedPrice();
 }
 
+function buildCalendarDailyHistory(
+  rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>,
+  migrationComplete: boolean
+): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string; completeness: "complete" | "partial" | "missing" }> {
+  const today = new Date().toISOString().slice(0, 10);
+  const todayUtc = new Date(today + "T00:00:00Z").getTime() + 86400000;
+  const rowByDay = new Map(rows.map((r) => [r.day, r]));
+
+  const result: ReturnType<typeof buildCalendarDailyHistory> = [];
+  for (let d = 0; d < 30; d += 1) {
+    const day = new Date(todayUtc - (29 - d) * 86400000).toISOString().slice(0, 10);
+    const row = rowByDay.get(day);
+    if (!row) {
+      result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", completeness: "missing" });
+      continue;
+    }
+
+    // Day completeness: a day is "complete" when every height in the day's
+    // range is indexed or verified empty. If any height is failed or missing,
+    // the day is "partial". Since we don't yet have per-height-to-day mapping
+    // for ALL heights (only for those with settlement facts), we mark every
+    // present day as "partial" by default. Once the migration populates
+    // block_time for empty heights, we'll be able to compute true completeness.
+    const completeness: "complete" | "partial" | "missing" = migrationComplete ? "partial" : "partial";
+
+    const serialized = serializeDailyCache([row], migrationComplete)[0];
+    result.push({ ...serialized, completeness });
+  }
+
+  return result;
+}
+
 function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>, migrationComplete: boolean): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
   return rows.map((row) => ({
     day: row.day,
@@ -919,16 +951,17 @@ export async function rebuildIndexerCaches(): Promise<void> {
     }
 
     const dailySince = getStartOfTodayUtc() - 30 * 24 * 60 * 60 * 1000;
-    const dailyRows = getIndexedDailyAggregates(dailySince);
-    setProviderDataCache("network_daily_history:30", serializeDailyCache(dailyRows, migrationComplete));
+    const rawDailyRows = getIndexedDailyAggregates(dailySince);
+    const dailyRows = buildCalendarDailyHistory(rawDailyRows, migrationComplete);
+    setProviderDataCache("network_daily_history:30", dailyRows);
     for (const service of getIndexedServiceAggregates(dailySince).slice(0, 100)) {
       const rows = getIndexedServiceDailyAggregates(dailySince, service.service_id);
-      setProviderDataCache(`service_daily_history:${service.service_id}:30`, serializeDailyCache(rows, migrationComplete));
+      setProviderDataCache(`service_daily_history:${service.service_id}:30`, buildCalendarDailyHistory(rows, migrationComplete));
     }
 
     if (migrationComplete) {
       const generatedAt = new Date().toISOString();
-      for (const row of dailyRows) {
+      for (const row of rawDailyRows) {
         upsertDailyRollup({ ...row, generated_at: generatedAt });
       }
     }

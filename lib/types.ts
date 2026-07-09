@@ -96,6 +96,8 @@ export type NetworkDailyHistoryPoint = {
   isEstimated?: boolean;
   relayCoverage?: number;
   revenueUpokt: bigint;
+  /** "complete" when all heights in the day are covered, "partial" when some are missing, "missing" when no data exists. */
+  completeness?: "complete" | "partial" | "missing";
 };
 
 export type ServiceDailyHistoryPoint = NetworkDailyHistoryPoint;

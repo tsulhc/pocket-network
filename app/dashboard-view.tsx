@@ -43,12 +43,15 @@ function compareRevenueDesc<T extends { revenueUpokt: string }>(a: T, b: T): num
   return bRevenue > aRevenue ? 1 : -1;
 }
 
-function buildNetworkTrendPath(points: Array<{ revenue: number }>, maxRevenue: number): string {
+function buildNetworkTrendPath(points: Array<{ revenue: number; completeness?: string }>, maxRevenue: number): string {
   if (points.length === 0 || maxRevenue === 0) return "";
+  const visible = points.filter((p) => p.completeness !== "missing");
 
-  return points
+  if (visible.length === 0) return "";
+
+  return visible
     .map((point, index) => {
-      const x = points.length === 1 ? 50 : (index / (points.length - 1)) * 100;
+      const x = visible.length === 1 ? 50 : (index / (visible.length - 1)) * 100;
       const y = 100 - (Math.max(0, point.revenue) / maxRevenue) * 100;
       return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
@@ -66,9 +69,11 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
   const trendPoints = candidatePoints.map((point) => ({
     day: point.day,
     revenue: toPoktNumber(point.revenueUpokt),
-    cuLoad: useCU ? point.estimatedComputeUnits! : point.relays
+    cuLoad: useCU ? point.estimatedComputeUnits! : point.relays,
+    completeness: point.completeness ?? "complete"
   }));
-  const maxRevenue = Math.max(...trendPoints.map((point) => point.revenue), 0);
+  const nonMissing = trendPoints.filter((p) => p.completeness !== "missing");
+  const maxRevenue = Math.max(...nonMissing.map((point) => point.revenue), 0);
   const maxCULoad = Math.max(...trendPoints.map((point) => point.cuLoad), 0);
   const latestPoint = trendPoints.at(-1);
   const totalRevenue = trendPoints.reduce((sum, point) => sum + point.revenue, 0);
@@ -119,17 +124,20 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
               <path d={linePath} />
             </svg>
             {trendPoints.map((point) => {
-              const height = maxCULoad === 0 ? 2 : Math.max(4, Math.round((point.cuLoad / maxCULoad) * 100));
+              const isMissing = point.completeness === "missing";
+              const isPartial = point.completeness === "partial";
+              const barValue = isMissing ? 0 : point.cuLoad;
+              const height = isMissing ? 2 : (maxCULoad === 0 ? 2 : Math.max(4, Math.round((barValue / maxCULoad) * 100)));
               const isActive = point === latestPoint;
               const loadUnit = useCU ? "CU" : "relays";
 
               return (
-                <div key={point.day} className="network-trend-bar-group" title={`${point.day}: ${formatCompactNumber(point.cuLoad)} ${loadUnit}, ${formatDecimal(point.revenue, 1)} POKT`}>
+                <div key={point.day} className="network-trend-bar-group" title={`${point.day}: ${isMissing ? "no data" : `${formatCompactNumber(point.cuLoad)} ${loadUnit}, ${formatDecimal(point.revenue, 1)} POKT`}`}>
                   <div
                     className="network-trend-bar"
                     style={{
                       height: `${height}%`,
-                      background: isActive ? 'linear-gradient(180deg, var(--green), rgba(25, 195, 125, 0.25))' : undefined,
+                      background: isMissing ? 'var(--muted)' : isPartial ? 'linear-gradient(180deg, rgba(255,255,255,0.15), rgba(255,255,255,0.05))' : undefined,
                       boxShadow: isActive ? '0 0 20px rgba(25, 195, 125, 0.25)' : undefined
                     }}
                   />
