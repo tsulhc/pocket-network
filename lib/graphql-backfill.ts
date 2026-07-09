@@ -53,16 +53,19 @@ async function repairHeightViaGraphQL(height: number): Promise<number> {
       return -1; // GraphQL hasn't finalized this height
     }
 
-    const events = await fetchSettlementsByBlockRange(height, height);
-    if (events.length === 0) {
-      // Block exists in GraphQL but has no settlement events → truly empty
-      saveIndexedBlock(height, [], undefined, "graphql");
-      return 0;
+    const result = await fetchSettlementsByBlockRange(height, height);
+    if (result.settlements.length === 0) {
+      if (result.blocksFound.has(height)) {
+        // Block exists in GraphQL but has no settlement events → truly empty
+        saveIndexedBlock(height, [], undefined, "graphql");
+        return 0;
+      }
+      return -1; // Block not found in GraphQL, not yet indexed
     }
-    const facts = events.map((event, index) => graphQLSettlementToFact(event, index));
-    const blockTime = events[0].blockTime;
+    const facts = result.settlements.map((event, index) => graphQLSettlementToFact(event, index));
+    const blockTime = result.settlements[0].blockTime;
     saveIndexedBlock(height, facts, blockTime, "graphql");
-    return events.length;
+    return result.settlements.length;
   } catch {
     return -1;
   }

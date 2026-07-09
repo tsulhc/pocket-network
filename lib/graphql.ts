@@ -89,44 +89,52 @@ type BlocksResponse = {
   };
 };
 
+const BLOCKS_QUERY = `query($from: BigInt!, $to: BigInt!) {
+  blocks(
+    filter: { height: { greaterThanOrEqualTo: $from, lessThanOrEqualTo: $to } }
+    orderBy: HEIGHT_ASC
+    first: 500
+  ) {
+    nodes {
+      height
+      header
+      eventClaimSettledsByBlockId(first: 500) {
+        nodes {
+          id
+          serviceId
+          supplierId
+          supplierOwnerId
+          numRelays
+          numEstimatedRelays
+          numEstimatedComputeUnits
+          claimedAmount
+          settledAmount
+        }
+      }
+    }
+  }
+}`;
+
+export type FetchBlocksResult = {
+  settlements: IndexedGraphQLSettlement[];
+  blocksFound: Set<number>;
+};
+
 export async function fetchSettlementsByBlockRange(
   fromHeight: number,
   toHeight: number
-): Promise<IndexedGraphQLSettlement[]> {
+): Promise<FetchBlocksResult> {
   const results: IndexedGraphQLSettlement[] = [];
+  const blocksFound = new Set<number>();
   let from = fromHeight;
 
   while (from <= toHeight) {
     const batchTo = Math.min(from + 200, toHeight);
-    const query = `query($from: BigInt!, $to: BigInt!) {
-      blocks(
-        filter: { height: { greaterThanOrEqualTo: $from, lessThanOrEqualTo: $to } }
-        orderBy: HEIGHT_ASC
-        first: 500
-      ) {
-        nodes {
-          height
-          header
-          eventClaimSettledsByBlockId(first: 500) {
-            nodes {
-              id
-              serviceId
-              supplierId
-              supplierOwnerId
-              numRelays
-              numEstimatedRelays
-              numEstimatedComputeUnits
-              claimedAmount
-              settledAmount
-            }
-          }
-        }
-      }
-    }`;
 
-    const data = await fetchGraphQL<BlocksResponse>(query, { from: String(from), to: String(batchTo) });
+    const data = await fetchGraphQL<BlocksResponse>(BLOCKS_QUERY, { from: String(from), to: String(batchTo) });
     for (const block of data.blocks.nodes) {
       const blockTime = Date.parse(block.header?.time ?? "");
+      blocksFound.add(Number(block.height));
       for (const node of block.eventClaimSettledsByBlockId.nodes) {
         results.push({
           id: node.id,
@@ -146,7 +154,7 @@ export async function fetchSettlementsByBlockRange(
     from = batchTo + 1;
   }
 
-  return results;
+  return { settlements: results, blocksFound };
 }
 
 export async function updateGraphQLWatermark(): Promise<void> {

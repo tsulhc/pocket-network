@@ -1343,6 +1343,50 @@ async function runDataMigration(): Promise<void> {
   logInfo("Backfilling block_time/day for empty indexed heights");
   backfillEmptyHeightMetadata();
 
+  // Seed contiguous from legacy checkpoint — the migration reprocessed all
+  // retained heights. The writeIndexedBlockTransaction already advances
+  // contiguous through confirmed gaps. If no legacy checkpoint exists,
+  // scan from 1 to find the actual boundary.
+  const currentContiguous = Number(getIndexerState("contiguous_processed_height") ?? 0);
+  if (currentContiguous === 0) {
+    const legacy = Number(legacyVal ?? 0);
+    if (legacy > 0) {
+      // Start from the legacy high-water mark and scan backward to find
+      // the first gap, then forward to confirm contiguous coverage
+      let contiguous = 0;
+      for (let h = legacy; h > 0; h -= 1) {
+        const coverage = getIndexedHeightCoverage(h, h);
+        const row = coverage[0];
+        if (row && (row.status === "indexed" || row.status === "empty")) {
+          contiguous = h;
+        } else {
+          break;
+        }
+      }
+      for (let h = contiguous + 1; h <= legacy; h += 1) {
+        const coverage = getIndexedHeightCoverage(h, h);
+        const row = coverage[0];
+        if (row && (row.status === "indexed" || row.status === "empty")) {
+          contiguous = h;
+        } else {
+          break;
+        }
+      }
+      setIndexerState("contiguous_processed_height", String(contiguous));
+      logInfo("Seeded contiguous checkpoint from legacy", { legacy, contiguous });
+    }
+  }
+
+  // Also seed highest_seen and highest_ingested if still at 0
+  const currentSeen = Number(getIndexerState("highest_seen_height") ?? 0);
+  if (currentSeen === 0 && legacyVal) {
+    setIndexerState("highest_seen_height", legacyVal);
+  }
+  const currentIngested = Number(getIndexerState("highest_ingested_height") ?? 0);
+  if (currentIngested === 0 && legacyVal) {
+    setIndexerState("highest_ingested_height", legacyVal);
+  }
+
   setIndexerState("data_version", String(INDEXER_DATA_VERSION));
   await rebuildIndexerCaches();
   logInfo("Data migration complete", { version: INDEXER_DATA_VERSION, reprocessedHeights: indexedHeights.length });
