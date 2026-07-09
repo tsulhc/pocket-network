@@ -503,6 +503,10 @@ const checkGapHeightsStatement = db.prepare(
   "SELECT height, status FROM indexed_heights WHERE height >= ? AND height <= ? ORDER BY height ASC"
 );
 
+const selectFailedHeightsStatement = db.prepare(
+  "SELECT height FROM indexed_heights WHERE status = 'failed' ORDER BY failure_count ASC, height DESC LIMIT ?"
+);
+
 const deleteOldSettlementFactsStatement = db.prepare("DELETE FROM settlement_facts WHERE block_time < ?");
 const deleteOldIndexedHeightsStatement = db.prepare("DELETE FROM indexed_heights WHERE height < ?");
 const deleteOldJobRunsStatement = db.prepare(
@@ -801,6 +805,15 @@ export function markIndexedHeightFailed(height: number, error: string, source = 
   const current = Number(getIndexerState("highest_seen_height") ?? 0);
   if (height > current) {
     setIndexerState("highest_seen_height", String(height));
+  }
+}
+
+export function getFailedHeights(limit = 100): number[] {
+  try {
+    const rows = selectFailedHeightsStatement.all(limit) as Array<{ height: number }>;
+    return rows.map((r) => r.height);
+  } catch {
+    return [];
   }
 }
 

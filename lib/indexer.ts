@@ -33,6 +33,12 @@ import {
 } from "@/lib/db";
 import type { TimeWindow } from "@/lib/types";
 import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
+import {
+  graphQLRepairFailedHeights,
+} from "@/lib/graphql-backfill";
+import {
+  updateGraphQLWatermark
+} from "@/lib/graphql";
 
 type RpcEvent = {
   type: string;
@@ -225,8 +231,8 @@ function logError(message: string, error: unknown, context?: Record<string, unkn
   console.error(`[pocket-dashboard:indexer] ${message}`, {
     ...context,
     error: error instanceof Error ? error.stack ?? error.message : String(error)
-  });
-}
+        });
+      }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1059,8 +1065,11 @@ async function processRepairHeights(heights: number[], concurrency: number, sour
 }
 
 async function runRepairLoop(): Promise<void> {
+  let graphQLCycleCounter = 0;
+  const GRAPHQL_REPAIR_INTERVAL = 6; // use GraphQL every Nth repair cycle
   while (true) {
     const startedAt = Date.now();
+    graphQLCycleCounter += 1;
     try {
       const latestHeight = await getLatestHeight();
       const retentionStartHeight = estimateBackfillStart(latestHeight, RETENTION_DAYS);
