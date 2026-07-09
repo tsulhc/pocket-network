@@ -67,6 +67,7 @@ export type DashboardData = {
   totalEstimatedRelays: number;
   totalEstimatedComputeUnits: number;
   relayCoverage: number;
+  computeUnitCoverage?: number;
   totalRevenueUpokt: bigint;
   activeProviders: number;
   activeChains: number;
