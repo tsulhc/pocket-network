@@ -570,7 +570,7 @@ const selectGapCountStatement = db.prepare(
       CAST(COALESCE(COUNT(*), 0) AS INTEGER) AS gaps,
       CAST(COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS INTEGER) AS failed
     FROM indexed_heights
-    WHERE status IN ('failed', 'empty')
+    WHERE status = 'failed'
   `
 );
 
