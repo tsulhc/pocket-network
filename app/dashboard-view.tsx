@@ -267,7 +267,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
 
   const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
   const topService = servicesByRevenue[0];
-  const cuCoverageComplete = data.totalEstimatedComputeUnits > 0;
+  const cuCoverageComplete = (data.computeUnitCoverage ?? 0) >= 1;
   const cuDenominator = cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays;
   const cuLabel = cuCoverageComplete ? "estimated compute units" : "relays";
   const revenuePerMillionCU = cuDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / cuDenominator) * 1_000_000;

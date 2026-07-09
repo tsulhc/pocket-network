@@ -46,17 +46,26 @@ def _validate_backup(path: str, source_facts: int) -> bool:
         conn.close()
 
 
-def _record_metadata(source_path: str, timestamp: str) -> None:
-    conn = sqlite3.connect(source_path)
-    try:
-        conn.execute(
-            "INSERT INTO indexer_state (key, value, updated_at) VALUES ('last_backup', ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (timestamp, datetime.datetime.utcnow().isoformat() + "Z"),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+def _record_manifest(backup_dir: str, timestamp: str, digest: str, size_mb: float) -> None:
+    import json
+    manifest_path = os.path.join(backup_dir, "backup-manifest.json")
+    entry = {
+        "timestampUtc": datetime.datetime.utcnow().isoformat() + "Z",
+        "file": f"pocket-{timestamp}.sqlite",
+        "sha256": digest,
+        "sizeMb": round(size_mb, 1),
+    }
+    entries = []
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, "r") as fh:
+                entries = json.load(fh)
+        except Exception:
+            entries = []
+    entries.insert(0, entry)
+    with open(manifest_path + ".tmp", "w") as fh:
+        json.dump(entries[:100], fh, indent=2)
+    os.replace(manifest_path + ".tmp", manifest_path)
 
 
 def backup_database(source_path: str, backup_dir: str, retention: int) -> bool:
@@ -116,7 +125,7 @@ def backup_database(source_path: str, backup_dir: str, retention: int) -> bool:
         print(f"[{datetime.datetime.utcnow().isoformat()}Z] Backup verified: "
               f"{os.path.basename(final_path)} ({size_mb:.1f} MB, sha256={digest[:16]}...)")
 
-        _record_metadata(source_path, timestamp)
+        _record_manifest(backup_dir, timestamp, digest, size_mb)
 
         backups = sorted(
             [f for f in os.listdir(backup_dir)

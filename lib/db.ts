@@ -90,31 +90,30 @@ export function acquireIndexerLock(): boolean {
   const lockfile = path.join(path.dirname(dbPath), "indexer.lock");
   try {
     const fd = fs.openSync(lockfile, "wx");
-    fs.writeSync(fd, String(process.pid));
+    fs.writeSync(fd, `${process.pid}\n`);
     fs.closeSync(fd);
     return true;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-      // Lock exists — check if the owning process is still alive
       try {
-        const pidStr = fs.readFileSync(lockfile, "utf-8").trim();
-        const pid = Number.parseInt(pidStr, 10);
+        const content = fs.readFileSync(lockfile, "utf-8").trim();
+        const pid = Number.parseInt(content.split("\n")[0], 10);
         if (pid > 0) {
           try {
             process.kill(pid, 0);
-            return false; // alive, genuine lock holder
+            return false;
           } catch {
-            // Stale lock — process is dead, take over
+            const stat = fs.statSync(lockfile);
+            const staleAge = Date.now() - stat.mtimeMs;
+            if (staleAge < 5000) return false;
             fs.unlinkSync(lockfile);
             const fd2 = fs.openSync(lockfile, "wx");
-            fs.writeSync(fd2, String(process.pid));
+            fs.writeSync(fd2, `${process.pid}\n${stat.ino}\n`);
             fs.closeSync(fd2);
             return true;
           }
         }
-      } catch {
-        // Can't read the lockfile — don't claim ownership
-      }
+      } catch { /* can't read — don't claim ownership */ }
     }
     return false;
   }
@@ -125,7 +124,8 @@ export function releaseIndexerLock(): void {
   try {
     const lockfile = path.join(path.dirname(dbPath), "indexer.lock");
     if (fs.existsSync(lockfile)) {
-      const pid = Number.parseInt(fs.readFileSync(lockfile, "utf-8").trim(), 10) || 0;
+      const content = fs.readFileSync(lockfile, "utf-8").trim();
+      const pid = Number.parseInt(content.split("\n")[0], 10);
       if (pid === process.pid) {
         fs.unlinkSync(lockfile);
       }
@@ -141,6 +141,8 @@ export type IndexerHealth = {
   lastSuccessfulCommit: string | null;
   lastBackup: string | null;
   isLocked: boolean;
+  gaps: number;
+  failedHeights: number;
 };
 
 export function getIndexerHealth(): IndexerHealth {
@@ -148,7 +150,8 @@ export function getIndexerHealth(): IndexerHealth {
   try {
     const lockfile = path.join(path.dirname(dbPath), "indexer.lock");
     if (fs.existsSync(lockfile)) {
-      const pid = Number.parseInt(fs.readFileSync(lockfile, "utf-8").trim(), 10) || 0;
+      const content = fs.readFileSync(lockfile, "utf-8").trim();
+      const pid = Number.parseInt(content.split("\n")[0], 10);
       try { process.kill(pid, 0); isLocked = true; } catch { /* stale */ }
     }
   } catch { /* ignored */ }
@@ -156,7 +159,13 @@ export function getIndexerHealth(): IndexerHealth {
   try {
     const dataVersion = getIndexerState("data_version");
     const processedHeight = getIndexerState("last_processed_height");
-    const targetHeight = getIndexerState("latest_network_height");
+    const targetHeight = getIndexerState("latest_seen_height");
+    let gaps = 0;
+    let failedHeights = 0;
+    try {
+      const gapRow = selectGapCountStatement.get() as { gaps: number; failed: number } | undefined;
+      if (gapRow) { gaps = gapRow.gaps; failedHeights = gapRow.failed; }
+    } catch { /* gaps query may not be available on older schema */ }
     return {
       schemaVersion: getMeta("schema_version") ?? null,
       dataVersion: dataVersion ?? null,
@@ -165,6 +174,8 @@ export function getIndexerHealth(): IndexerHealth {
       lastSuccessfulCommit: getIndexerState("last_successful_commit") ?? null,
       lastBackup: getIndexerState("last_backup") ?? null,
       isLocked,
+      gaps,
+      failedHeights,
     };
   } catch {
     return {
@@ -175,6 +186,8 @@ export function getIndexerHealth(): IndexerHealth {
       lastSuccessfulCommit: null,
       lastBackup: null,
       isLocked,
+      gaps: 0,
+      failedHeights: 0,
     };
   }
 }
@@ -539,6 +552,16 @@ const selectGlobalComputeUnitCoverageStatement = db.prepare(
     SELECT CAST(COALESCE(SUM(CASE WHEN estimated_compute_units IS NOT NULL THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) AS REAL) AS coverage
     FROM settlement_facts
     WHERE block_time >= ?
+  `
+);
+
+const selectGapCountStatement = db.prepare(
+  `
+    SELECT
+      CAST(COALESCE(COUNT(*), 0) AS INTEGER) AS gaps,
+      CAST(COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS INTEGER) AS failed
+    FROM indexed_heights
+    WHERE status IN ('failed', 'empty')
   `
 );
 

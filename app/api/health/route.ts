@@ -9,11 +9,12 @@ export async function GET() {
   return Response.json({
     status: readOnly ? "ready" : "writing",
     dataVersion: health.dataVersion,
-    schemaVersion: health.schemaVersion,
     indexer: {
       isLocked: health.isLocked,
       processedHeight: health.processedHeight,
       targetHeight: health.targetHeight,
+      gaps: health.gaps,
+      failedHeights: health.failedHeights,
       lastSuccessfulCommit: health.lastSuccessfulCommit,
       lastBackup: health.lastBackup,
     },

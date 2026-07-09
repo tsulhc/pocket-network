@@ -107,6 +107,7 @@ type SerializedDashboardCache = {
   totalEstimatedRelays: number;
   totalEstimatedComputeUnits: number;
   relayCoverage: number;
+  computeUnitCoverage?: number;
   totalRevenueUpokt: string;
   activeProviders: number;
   activeChains: number;
@@ -232,12 +233,38 @@ function sleep(ms: number): Promise<void> {
 }
 
 function formatError(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  if (error instanceof Error) {
+    const parts: string[] = [`${error.name}: ${error.message}`];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let cause: unknown = (error as any).cause;
+    while (cause instanceof Error) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const code = (cause as any).code as string | undefined;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const syscall = (cause as any).syscall as string | undefined;
+      const detail = code || syscall ? `[${[code, syscall].filter(Boolean).join("/")}]` : "";
+      parts.push(`← ${cause.name}${detail ? ` ${detail}` : ""}: ${cause.message}`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      cause = (cause as any).cause;
+    }
+    return parts.join("\n");
+  }
   return String(error);
 }
 
 function isTimeoutError(error: unknown): boolean {
-  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const name = error instanceof Error ? error.name : "";
+  if (name === "TimeoutError" || name === "AbortError" || name === "TypeError") return true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let cause: unknown = (error instanceof Error) ? (error as any).cause : undefined;
+  while (cause instanceof Error) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((cause as any).code === "ETIMEDOUT" || (cause as any).code === "ECONNRESET" || (cause as any).code === "ECONNREFUSED") return true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    cause = (cause as any).cause;
+  }
+  return false;
 }
 
 function recordRpcResult(rpcUrl: string, ok: boolean, latencyMs: number, error?: unknown): void {
@@ -813,6 +840,7 @@ export async function rebuildIndexerCaches(): Promise<void> {
         ? serviceRows.reduce((sum, row) => sum + (row.estimated_compute_units ?? 0), 0)
         : 0;
       const relayCoverage = migrationComplete ? getGlobalRelayCoverage(since) : 0;
+      const computeUnitCoverage = migrationComplete ? getGlobalComputeUnitCoverage(since) : 0;
       const totalRevenueUpokt = serviceRows.reduce((sum, row) => sum + BigInt(row.revenue_upokt), 0n);
       const earliestSettlementTime = serviceRows.length > 0 ? new Date(since).toISOString() : null;
       const latestSettlementTime = latestFact ? new Date(latestFact.block_time).toISOString() : null;
@@ -856,6 +884,7 @@ export async function rebuildIndexerCaches(): Promise<void> {
         totalEstimatedRelays,
         totalEstimatedComputeUnits,
         relayCoverage,
+        computeUnitCoverage,
         totalRevenueUpokt: totalRevenueUpokt.toString(),
         activeProviders: providerRows.length,
         activeChains: services.length,

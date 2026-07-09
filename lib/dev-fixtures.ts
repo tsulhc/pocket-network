@@ -98,6 +98,7 @@ export function getDevelopmentDashboardData(window: TimeWindow): DashboardData {
     totalEstimatedRelays: totalRelays,
     totalEstimatedComputeUnits: 0,
     relayCoverage: 0,
+    computeUnitCoverage: 0,
     totalRevenueUpokt,
     activeProviders: providers.length,
     activeChains: services.length,
