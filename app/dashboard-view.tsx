@@ -57,14 +57,16 @@ function buildNetworkTrendPath(points: Array<{ revenue: number }>, maxRevenue: n
 
 function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistoryPoint[] }) {
   const todayUtc = new Date().toISOString().slice(0, 10);
-  const hasCUData = history.some((point) => (point.estimatedComputeUnits ?? 0) > 0);
-  const trendPoints = history
+  const candidatePoints = history
     .filter((point) => point.day < todayUtc)
-    .slice(-30)
-    .map((point) => ({
+    .slice(-30);
+  const daysWithCU = candidatePoints.filter((p) => (p.estimatedComputeUnits ?? 0) > 0).length;
+  const allDaysHaveCU = daysWithCU === candidatePoints.length && candidatePoints.length > 0;
+  const useCU = allDaysHaveCU;
+  const trendPoints = candidatePoints.map((point) => ({
     day: point.day,
     revenue: toPoktNumber(point.revenueUpokt),
-    cuLoad: hasCUData ? (point.estimatedComputeUnits ?? point.relays) : point.relays
+    cuLoad: useCU ? point.estimatedComputeUnits! : point.relays
   }));
   const maxRevenue = Math.max(...trendPoints.map((point) => point.revenue), 0);
   const maxCULoad = Math.max(...trendPoints.map((point) => point.cuLoad), 0);
@@ -93,7 +95,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
               <strong style={{ color: 'var(--yellow-primary)' }}>{latestPoint ? `${formatDecimal(latestPoint.revenue, 1)} POKT` : "n/a"}</strong>
             </div>
             <div className="panel-inset">
-              <span className="hero-highlight-label">{hasCUData ? "Latest CU" : "Latest Relays"}</span>
+              <span className="hero-highlight-label">{useCU ? "Latest CU" : "Latest Relays"}</span>
               <strong style={{ color: 'var(--green)' }}>{latestPoint ? formatCompactNumber(latestPoint.cuLoad) : "n/a"}</strong>
             </div>
             <div className="panel-inset">
@@ -101,7 +103,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
               <strong>{formatDecimal(totalRevenue, 1)} POKT</strong>
             </div>
             <div className="panel-inset">
-              <span className="hero-highlight-label">{hasCUData ? "Window CU" : "Window Relays"}</span>
+              <span className="hero-highlight-label">{useCU ? "Window CU" : "Window Relays"}</span>
               <strong>{formatCompactNumber(totalCULoad)}</strong>
             </div>
           </div>
@@ -119,7 +121,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
             {trendPoints.map((point) => {
               const height = maxCULoad === 0 ? 2 : Math.max(4, Math.round((point.cuLoad / maxCULoad) * 100));
               const isActive = point === latestPoint;
-              const loadUnit = hasCUData ? "CU" : "relays";
+              const loadUnit = useCU ? "CU" : "relays";
 
               return (
                 <div key={point.day} className="network-trend-bar-group" title={`${point.day}: ${formatCompactNumber(point.cuLoad)} ${loadUnit}, ${formatDecimal(point.revenue, 1)} POKT`}>
@@ -140,7 +142,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
           <p className="footer-note network-trend-legend">
             <span>
               <span className="network-trend-legend-bar" />
-              Daily {hasCUData ? "compute units" : "relays"}
+              Daily {useCU ? "compute units" : "relays"}
             </span>
             <span>
               <span className="network-trend-legend-line" />
@@ -265,7 +267,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
 
   const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
   const topService = servicesByRevenue[0];
-  const cuCoverageComplete = data.relayCoverage >= 1 && data.totalEstimatedComputeUnits > 0;
+  const cuCoverageComplete = data.totalEstimatedComputeUnits > 0;
   const cuDenominator = cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays;
   const cuLabel = cuCoverageComplete ? "estimated compute units" : "relays";
   const revenuePerMillionCU = cuDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / cuDenominator) * 1_000_000;

@@ -129,8 +129,9 @@ export function buildProviderServiceOpportunity(
   if (options?.appsStaked != null && options.appsStaked > 0) {
     const expectedAssignments = getExpectedAssignments(options.appsStaked, sessionSlots, providerSupplierCount, totalSuppliers);
     const maxAssignments = providerSupplierCount * sessionSlots;
-    if (maxAssignments > 0) {
-      appComponent = Math.min(expectedAssignments / (maxAssignments * 0.5), 1) * 0.15;
+    if (maxAssignments > 0 && expectedAssignments > 0) {
+      const normalized = expectedAssignments / maxAssignments;
+      appComponent = Math.log2(1 + normalized) * 0.15;
     }
   }
 

@@ -65,7 +65,7 @@ export default async function RewardsPage() {
   const topService = servicesByRevenue[0];
   const averageReward = data.activeProviders === 0 ? 0 : toPoktNumber(data.totalRevenueUpokt) / data.activeProviders;
   const top5ProviderRewards = providersByRevenue.slice(0, 5).reduce((sum, provider) => sum + provider.revenueUpokt, 0n);
-  const cuCoverageComplete = data.relayCoverage >= 1 && data.totalEstimatedComputeUnits > 0;
+  const cuCoverageComplete = data.totalEstimatedComputeUnits > 0;
   const cuDenominator = cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays;
   const rewardPerMillionCU = cuDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / cuDenominator) * 1_000_000;
   const rewardHistoryValues = history.map((point) => toPoktNumber(point.revenueUpokt));
