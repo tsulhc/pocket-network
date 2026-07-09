@@ -57,21 +57,22 @@ function buildNetworkTrendPath(points: Array<{ revenue: number }>, maxRevenue: n
 
 function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistoryPoint[] }) {
   const todayUtc = new Date().toISOString().slice(0, 10);
+  const hasCUData = history.some((point) => (point.estimatedComputeUnits ?? 0) > 0);
   const trendPoints = history
     .filter((point) => point.day < todayUtc)
     .slice(-30)
     .map((point) => ({
     day: point.day,
     revenue: toPoktNumber(point.revenueUpokt),
-    relays: point.relays
+    cuLoad: hasCUData ? (point.estimatedComputeUnits ?? point.relays) : point.relays
   }));
   const maxRevenue = Math.max(...trendPoints.map((point) => point.revenue), 0);
-  const maxRelays = Math.max(...trendPoints.map((point) => point.relays), 0);
+  const maxCULoad = Math.max(...trendPoints.map((point) => point.cuLoad), 0);
   const latestPoint = trendPoints.at(-1);
   const totalRevenue = trendPoints.reduce((sum, point) => sum + point.revenue, 0);
-  const totalRelays = trendPoints.reduce((sum, point) => sum + point.relays, 0);
+  const totalCULoad = trendPoints.reduce((sum, point) => sum + point.cuLoad, 0);
   const linePath = buildNetworkTrendPath(trendPoints, maxRevenue);
-  const hasData = trendPoints.some((point) => point.revenue > 0 || point.relays > 0);
+  const hasData = trendPoints.some((point) => point.revenue > 0 || point.cuLoad > 0);
 
   return (
     <section className="panel section network-trend-panel themed section-theme-demand" style={{ position: 'relative' }}>
@@ -79,7 +80,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
         <div>
           <span className="eyebrow eyebrow-ghost">Market</span>
           <h2 className="section-title">Network Trend</h2>
-          <p className="section-subtitle">Daily rewards and finalized relay demand over the last 30 days.</p>
+          <p className="section-subtitle">Daily rewards and finalized compute unit demand over the last 30 days.</p>
         </div>
         <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last {trendPoints.length} Days</span>
       </div>
@@ -92,20 +93,20 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
               <strong style={{ color: 'var(--yellow-primary)' }}>{latestPoint ? `${formatDecimal(latestPoint.revenue, 1)} POKT` : "n/a"}</strong>
             </div>
             <div className="panel-inset">
-              <span className="hero-highlight-label">Latest Relays</span>
-              <strong style={{ color: 'var(--green)' }}>{latestPoint ? formatCompactNumber(latestPoint.relays) : "n/a"}</strong>
+              <span className="hero-highlight-label">{hasCUData ? "Latest CU" : "Latest Relays"}</span>
+              <strong style={{ color: 'var(--green)' }}>{latestPoint ? formatCompactNumber(latestPoint.cuLoad) : "n/a"}</strong>
             </div>
             <div className="panel-inset">
               <span className="hero-highlight-label">Window Rewards</span>
               <strong>{formatDecimal(totalRevenue, 1)} POKT</strong>
             </div>
             <div className="panel-inset">
-              <span className="hero-highlight-label">Window Relays</span>
-              <strong>{formatCompactNumber(totalRelays)}</strong>
+              <span className="hero-highlight-label">{hasCUData ? "Window CU" : "Window Relays"}</span>
+              <strong>{formatCompactNumber(totalCULoad)}</strong>
             </div>
           </div>
 
-          <div className="network-trend-chart" aria-label="Network revenue and relay trend chart">
+          <div className="network-trend-chart" aria-label="Network revenue and workload trend chart">
             <div className="network-trend-gridlines" aria-hidden="true">
               <span />
               <span />
@@ -116,11 +117,12 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
               <path d={linePath} />
             </svg>
             {trendPoints.map((point) => {
-              const height = maxRelays === 0 ? 2 : Math.max(4, Math.round((point.relays / maxRelays) * 100));
+              const height = maxCULoad === 0 ? 2 : Math.max(4, Math.round((point.cuLoad / maxCULoad) * 100));
               const isActive = point === latestPoint;
+              const loadUnit = hasCUData ? "CU" : "relays";
 
               return (
-                <div key={point.day} className="network-trend-bar-group" title={`${point.day}: ${formatCompactNumber(point.relays)} relays, ${formatDecimal(point.revenue, 1)} POKT`}>
+                <div key={point.day} className="network-trend-bar-group" title={`${point.day}: ${formatCompactNumber(point.cuLoad)} ${loadUnit}, ${formatDecimal(point.revenue, 1)} POKT`}>
                   <div
                     className="network-trend-bar"
                     style={{
@@ -138,7 +140,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
           <p className="footer-note network-trend-legend">
             <span>
               <span className="network-trend-legend-bar" />
-              Daily relays
+              Daily {hasCUData ? "compute units" : "relays"}
             </span>
             <span>
               <span className="network-trend-legend-line" />
@@ -263,10 +265,10 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
 
   const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
   const topService = servicesByRevenue[0];
-  const estimatedCoverageComplete = data.relayCoverage >= 1;
-  const relayDenominator = estimatedCoverageComplete && data.totalEstimatedRelays > 0 ? data.totalEstimatedRelays : data.totalRelays;
-  const relayLabel = estimatedCoverageComplete ? "estimated relays" : "relays";
-  const revenuePerMillionRelays = relayDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / relayDenominator) * 1_000_000;
+  const cuCoverageComplete = data.relayCoverage >= 1 && data.totalEstimatedComputeUnits > 0;
+  const cuDenominator = cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays;
+  const cuLabel = cuCoverageComplete ? "estimated compute units" : "relays";
+  const revenuePerMillionCU = cuDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / cuDenominator) * 1_000_000;
   const indexerLag =
     data.indexerTargetHeight != null && data.indexerProcessedHeight != null
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
@@ -280,9 +282,9 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
           <div className="hero-main dashboard-hero-main">
             <div className="hero-copy hero-copy-strong dashboard-hero-copy">
               <span className="eyebrow">Network Analytics</span>
-              <h1>Earn POKT Serving Relays.</h1>
+              <h1>Earn POKT Serving Workload.</h1>
               <p>
-                Track finalized relays, rewards, and service concentration through a privacy-safe lens built from indexed settlement events.
+                Track finalized compute units, rewards, and service concentration through a privacy-safe lens built from indexed settlement events.
               </p>
 
               <div className="window-tabs" aria-label="time windows">
@@ -308,9 +310,9 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
                   <p>Total rewards distributed in the selected period.</p>
                 </div>
                 <div className="hero-highlight metric-glow-demand">
-                  <span className="hero-highlight-label">Relay Volume</span>
-                  <strong className="accent-number">{formatCompactNumber(data.totalRelays)}</strong>
-                  <p>Finalized demand captured in this window.</p>
+                  <span className="hero-highlight-label">{cuCoverageComplete ? "Compute Units" : "Relay Volume"}</span>
+                  <strong className="accent-number">{formatCompactNumber(cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays)}</strong>
+                  <p>{cuCoverageComplete ? "Estimated compute workload captured in this window." : "Finalized relay demand captured in this window."}</p>
                 </div>
               </div>
             </div>
@@ -338,8 +340,8 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
                   <strong>{formatUpokt(toBigInt(data.totalRevenueUpokt), 1)}</strong>
                 </div>
                 <div>
-                  <span>Relay Volume</span>
-                  <strong>{formatCompactNumber(data.totalRelays)}</strong>
+                  <span>{cuCoverageComplete ? "Compute Units" : "Relay Volume"}</span>
+                  <strong>{formatCompactNumber(cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays)}</strong>
                 </div>
               </div>
               <div className="network-pulse-footer">
@@ -355,17 +357,17 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
               <h2>Pocket Network Highlights.</h2>
               <ul className="narrative-points">
                 <li>
-                  <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong> earned per 1M {relayLabel} in this period.
+                  <strong>{formatDecimal(revenuePerMillionCU, 2)} POKT</strong> earned per 1M {cuLabel} in this period.
                 </li>
                 <li>
-                  <strong>{formatUsd(revenuePerMillionRelays * data.poktPriceUsd, 2)}</strong> estimated value per 1M {relayLabel}.
+                  <strong>{formatUsd(revenuePerMillionCU * data.poktPriceUsd, 2)}</strong> estimated value per 1M {cuLabel}.
                 </li>
                 <li>
                   <strong>{topService ? topService.serviceName : "n/a"}</strong> is the top reward chain in this period.
                 </li>
-                {!estimatedCoverageComplete && (
+                {!cuCoverageComplete && (
                 <li className="muted">
-                  <em>Denominator uses sampled relays; estimated-relay coverage is partial ({formatPercent(data.relayCoverage * 100, 0)}).</em>
+                  <em>Estimated compute unit coverage is incomplete ({formatPercent(data.relayCoverage * 100, 0)}); CU-denominated values are derived from sampled relays.</em>
                 </li>
                 )}
               </ul>

@@ -30,7 +30,7 @@ const SORT_COLUMNS: SortColumn[] = [
     key: "opportunity",
     label: "Demand Signal (experimental)",
     align: "right",
-    tooltip: "The higher the score, the more potential for providers to profit from participating in this network."
+    tooltip: "Combines revenue yield, supplier competition, and modeled application-session opportunities. Applications increase session selection breadth but do not guarantee workload or revenue. The higher the score, the more potential for providers to profit from participating in this network."
   }
 ];
 
@@ -233,7 +233,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
   }, [data?.services, query, sort, sortDirection]);
   const topRevenueServices = [...(data?.services ?? [])]
     .sort(compareRevenueDesc)
-    .slice(0, 4);
+    .slice(0, 6);
 
   if (!data) {
     return (
@@ -291,7 +291,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
       <section className="panel section">
         <div className="section-title-row">
           <div>
-            <h2 className="section-title">Top 4 Revenue Chains</h2>
+            <h2 className="section-title">Top 6 Revenue Chains</h2>
             <p className="section-subtitle">Highest-earning services in the current 30d snapshot.</p>
           </div>
           <span className="pill">Revenue</span>
@@ -329,45 +329,6 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
         </div>
 
         <ServiceDemandMap services={data.services} totalRevenue={data.totalRevenueUpokt} />
-      </section>
-      )}
-
-      {mode === "service-demand" && (
-      <section className="panel section themed section-theme-revenue">
-        <div className="section-title-row">
-          <div>
-            <h2 className="section-title">Top Services</h2>
-            <p className="section-subtitle">Compact leaderboard for the highest earning services.</p>
-          </div>
-          <span className="pill">Leaderboards</span>
-        </div>
-
-        <div className="service-list">
-          {[...data.services]
-            .sort(compareRevenueDesc)
-            .slice(0, 8)
-            .map((service) => {
-              const revenuePerProviderValue = toPoktNumber(service.revenueUpokt) / Math.max(service.providerCount, 1);
-              return (
-                <div key={service.serviceId} className="service-row service-row-rich">
-                  <div className="service-row-top">
-                    <div>
-                      <strong style={{ fontSize: '1.05rem' }}>{service.serviceName}</strong>
-                      <div className="muted mono" style={{ fontSize: '0.75rem', marginTop: '4px' }}>{service.serviceId}</div>
-                    </div>
-                    <div className="right">
-                      <strong className="accent-number" style={{ fontSize: '1.1rem' }}>{formatUpokt(BigInt(service.revenueUpokt), 1)}</strong>
-                      <div className="muted" style={{ fontSize: '0.85rem' }}>{formatInteger(service.relays)} relays</div>
-                    </div>
-                  </div>
-                  <div className="provider-row-metrics">
-                    <span>{formatInteger(service.providerCount)} domains</span>
-                    <span style={{ color: 'var(--green)' }}>{formatDecimal(revenuePerProviderValue, 1)} POKT / domain</span>
-                  </div>
-                </div>
-              );
-            })}
-        </div>
       </section>
       )}
 

@@ -124,7 +124,17 @@ export function buildProviderServiceOpportunity(
   const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
   const selectionProbability = getSelectionProbability(supplierCount, providerSupplierCount, sessionSlots);
   const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
-  const opportunityScore = projectedRevenuePerSupplierPokt * (0.65 + (selectionProbability / 100) * 0.35);
+
+  let appComponent = 0;
+  if (options?.appsStaked != null && options.appsStaked > 0) {
+    const expectedAssignments = getExpectedAssignments(options.appsStaked, sessionSlots, providerSupplierCount, totalSuppliers);
+    const maxAssignments = providerSupplierCount * sessionSlots;
+    if (maxAssignments > 0) {
+      appComponent = Math.min(expectedAssignments / (maxAssignments * 0.5), 1) * 0.15;
+    }
+  }
+
+  const opportunityScore = projectedRevenuePerSupplierPokt * (0.55 + (selectionProbability / 100) * 0.30 + appComponent);
 
   const result: ProviderServiceOpportunity = {
     serviceId: service.serviceId,
@@ -205,6 +215,16 @@ export function buildAllocatedServiceOpportunity(
   const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
   const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
   const selectionProbability = getSelectionProbability(Math.max(service.supplierCount ?? 0, 0), allocatedSupplierCount, sessionSlots);
+  const totalSuppliers = Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount;
+
+  let appComponent = 0;
+  if (options?.appsStaked != null && options.appsStaked > 0) {
+    const expectedAssignments = getExpectedAssignments(options.appsStaked, sessionSlots, allocatedSupplierCount, totalSuppliers);
+    const maxAssignments = allocatedSupplierCount * sessionSlots;
+    if (maxAssignments > 0) {
+      appComponent = Math.min(expectedAssignments / (maxAssignments * 0.5), 1) * 0.15;
+    }
+  }
 
   const result: ProviderServiceOpportunity = {
     ...opportunity,
@@ -214,7 +234,7 @@ export function buildAllocatedServiceOpportunity(
     expectedSharePercent: (Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount) === 0
       ? 0
       : (allocatedSupplierCount / (Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount)) * 100,
-    opportunityScore: projectedRevenuePerSupplierPokt * (0.65 + (selectionProbability / 100) * 0.35)
+    opportunityScore: projectedRevenuePerSupplierPokt * (0.55 + (selectionProbability / 100) * 0.30 + appComponent)
   };
 
   if (options?.appsStaked != null && options.appsStaked > 0) {
