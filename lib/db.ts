@@ -79,15 +79,104 @@ export type IndexedDailyAggregate = {
 
 const defaultDbPath = path.join(process.cwd(), "data", "pocket-dashboard.sqlite");
 const dbPath = process.env.POCKET_SQLITE_PATH ?? defaultDbPath;
+const isReadOnly = process.env.POCKET_DB_READONLY === "true";
 
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+export function isDatabaseReadOnly(): boolean {
+  return isReadOnly;
+}
 
-const db = new Database(dbPath);
+export function acquireIndexerLock(): boolean {
+  if (isReadOnly) return false;
+  const lockfile = path.join(path.dirname(dbPath), "indexer.lock");
+  try {
+    const existing = fs.existsSync(lockfile)
+      ? Number.parseInt(fs.readFileSync(lockfile, "utf-8").trim(), 10) || 0
+      : 0;
+    if (existing > 0) {
+      try {
+        process.kill(existing, 0);
+        return false;
+      } catch {
+        // Stale lock — process no longer running, safe to overwrite
+      }
+    }
+    fs.writeFileSync(lockfile, String(process.pid), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-db.pragma("journal_mode = WAL");
-db.pragma("synchronous = NORMAL");
+export function releaseIndexerLock(): void {
+  if (isReadOnly) return;
+  try {
+    const lockfile = path.join(path.dirname(dbPath), "indexer.lock");
+    if (fs.existsSync(lockfile)) {
+      const pid = Number.parseInt(fs.readFileSync(lockfile, "utf-8").trim(), 10) || 0;
+      if (pid === process.pid) {
+        fs.unlinkSync(lockfile);
+      }
+    }
+  } catch { /* best-effort cleanup */ }
+}
 
-db.exec(`
+export type IndexerHealth = {
+  schemaVersion: string | null;
+  dataVersion: string | null;
+  processedHeight: number | null;
+  targetHeight: number | null;
+  lastSuccessfulCommit: string | null;
+  lastBackup: string | null;
+  isLocked: boolean;
+};
+
+export function getIndexerHealth(): IndexerHealth {
+  let isLocked = false;
+  try {
+    const lockfile = path.join(path.dirname(dbPath), "indexer.lock");
+    if (fs.existsSync(lockfile)) {
+      const pid = Number.parseInt(fs.readFileSync(lockfile, "utf-8").trim(), 10) || 0;
+      try { process.kill(pid, 0); isLocked = true; } catch { /* stale */ }
+    }
+  } catch { /* ignored */ }
+
+  try {
+    const dataVersion = getMeta("data_version");
+    const processedHeight = getMeta("last_processed_height");
+    const targetHeight = getMeta("latest_network_height");
+    return {
+      schemaVersion: getMeta("indexer_data_version") ?? null,
+      dataVersion: dataVersion ?? null,
+      processedHeight: processedHeight ? Number.parseInt(processedHeight, 10) || null : null,
+      targetHeight: targetHeight ? Number.parseInt(targetHeight, 10) || null : null,
+      lastSuccessfulCommit: getMeta("last_successful_commit") ?? null,
+      lastBackup: getMeta("last_backup") ?? null,
+      isLocked,
+    };
+  } catch {
+    return {
+      schemaVersion: null,
+      dataVersion: null,
+      processedHeight: null,
+      targetHeight: null,
+      lastSuccessfulCommit: null,
+      lastBackup: null,
+      isLocked,
+    };
+  }
+}
+
+let db: Database.Database;
+
+if (isReadOnly) {
+  db = new Database(dbPath, { readonly: true, fileMustExist: true });
+} else {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("busy_timeout = 10000");
+  db.exec(`
   CREATE TABLE IF NOT EXISTS settlement_blocks (
     height INTEGER PRIMARY KEY,
     block_time TEXT NOT NULL,
@@ -182,14 +271,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS indexed_heights_status_idx ON indexed_heights(status, height);
 `);
 
-for (const col of ["estimated_relays", "claimed_compute_units", "estimated_compute_units"]) {
-  try { db.exec(`ALTER TABLE settlement_facts ADD COLUMN ${col} INTEGER`); } catch { /* column already exists */ }
-}
+  for (const col of ["estimated_relays", "claimed_compute_units", "estimated_compute_units"]) {
+    try { db.exec(`ALTER TABLE settlement_facts ADD COLUMN ${col} INTEGER`); } catch { /* column already exists */ }
+  }
 
-const settlementFactsColumns = db.prepare("PRAGMA table_info(settlement_facts)").all() as Array<{ name: string }>;
-const hasLegacyColumn = (col: string) => settlementFactsColumns.some((c) => c.name === col);
-if (!hasLegacyColumn("relays")) {
-  try { db.exec("ALTER TABLE settlement_facts ADD COLUMN relays INTEGER"); } catch { /* fallback */ }
+  const settlementFactsColumns = db.prepare("PRAGMA table_info(settlement_facts)").all() as Array<{ name: string }>;
+  const hasLegacyColumn = (col: string) => settlementFactsColumns.some((c) => c.name === col);
+  if (!hasLegacyColumn("relays")) {
+    try { db.exec("ALTER TABLE settlement_facts ADD COLUMN relays INTEGER"); } catch { /* fallback */ }
+  }
 }
 
 const selectSettlementBlocksStatement = db.prepare(

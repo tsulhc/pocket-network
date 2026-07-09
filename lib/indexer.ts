@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import WebSocket from "ws";
 
 import {
+  acquireIndexerLock,
   finishJobRun,
   getDashboardCache,
   getIndexedDailyAggregates,
@@ -16,6 +17,7 @@ import {
   markIndexedHeightFailed,
   pruneIndexerData,
   pruneIndexedHeightCoverage,
+  releaseIndexerLock,
   saveIndexedBlock,
   saveIndexedServices,
   saveIndexedSupplierDomains,
@@ -1391,6 +1393,17 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
   const startedAt = Date.now();
   const jobId = startJobRun("indexer_start", options as Record<string, unknown>);
   const liveFirst = Boolean(options.live && !options.once && !options.backfillDays && !options.fromHeight && !options.toHeight);
+
+  if (!acquireIndexerLock()) {
+    logInfo("Indexer is already running on this database; exiting.");
+    setMeta("last_successful_commit", new Date().toISOString());
+    finishJobRun(jobId, "success", startedAt, { reason: "lock_unavailable" });
+    return;
+  }
+
+  process.on("exit", releaseIndexerLock);
+  process.on("SIGINT", () => { releaseIndexerLock(); process.exit(0); });
+  process.on("SIGTERM", () => { releaseIndexerLock(); process.exit(0); });
 
   warmupSessionState();
 
