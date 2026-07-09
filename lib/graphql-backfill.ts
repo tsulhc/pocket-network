@@ -4,13 +4,18 @@ import {
   type IndexedSettlementFact
 } from "@/lib/db";
 import {
-  fetchSettlementsForHeight,
+  fetchSettlementsByBlockRange,
   isGraphQLHealthy,
 } from "@/lib/graphql";
 
+function hashIdentity(id: string): string {
+  const crypto = require("node:crypto") as typeof import("node:crypto");
+  return crypto.createHash("sha256").update(id, "utf-8").digest("hex").slice(0, 16);
+}
+
 function graphQLSettlementToFact(event: {
   id: string;
-  sessionEndHeight: number;
+  blockHeight: number;
   blockTime: number;
   serviceId: string;
   supplierId: string;
@@ -27,30 +32,33 @@ function graphQLSettlementToFact(event: {
   const upokt = event.settledAmount || event.claimedAmount || "0";
 
   return {
-    height: event.sessionEndHeight,
+    height: event.blockHeight,
     eventIndex,
-    blockTime: Math.floor(event.blockTime / 1000),
+    blockTime: event.blockTime,
     day,
     hour,
     serviceId: event.serviceId,
-    supplierHash: event.supplierId,
-    ownerHash: event.ownerId,
+    supplierHash: hashIdentity(event.supplierId),
+    ownerHash: event.ownerId ? hashIdentity(event.ownerId) : null,
     relays: event.numRelays,
     estimatedRelays: event.numEstimatedRelays > 0 ? event.numEstimatedRelays : undefined,
     estimatedComputeUnits: event.numEstimatedComputeUnits > 0 ? event.numEstimatedComputeUnits : undefined,
     revenueUpokt: upokt,
+    ingestionSource: "graphql",
+    sourceRecordId: event.id,
   };
 }
 
 async function repairHeightViaGraphQL(height: number): Promise<number> {
   try {
-    const events = await fetchSettlementsForHeight(height);
+    const events = await fetchSettlementsByBlockRange(height, height);
     if (events.length === 0) {
       saveIndexedBlock(height, [], undefined, "graphql");
       return 0;
     }
     const facts = events.map((event, index) => graphQLSettlementToFact(event, index));
-    saveIndexedBlock(height, facts, Math.floor(events[0].blockTime), "graphql");
+    const blockTime = events[0].blockTime;
+    saveIndexedBlock(height, facts, blockTime, "graphql");
     return events.length;
   } catch {
     return -1;

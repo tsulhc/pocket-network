@@ -15,6 +15,9 @@ import {
   getGlobalRelayCoverage,
   getGlobalComputeUnitCoverage,
   getLatestIndexedFact,
+  getDayCoverage,
+  getEmptyHeightsWithoutMetadata,
+  updateHeightMetadata,
   markIndexedHeightFailed,
   pruneIndexerData,
   pruneIndexedHeightCoverage,
@@ -805,32 +808,45 @@ function buildCalendarDailyHistory(
   rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>,
   migrationComplete: boolean
 ): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string; completeness: "complete" | "partial" | "missing" }> {
-  const today = new Date().toISOString().slice(0, 10);
-  const todayUtc = new Date(today + "T00:00:00Z").getTime() + 86400000;
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).getTime();
+  const dayCoverage = getDayCoverageMap();
+
   const rowByDay = new Map(rows.map((r) => [r.day, r]));
 
   const result: ReturnType<typeof buildCalendarDailyHistory> = [];
   for (let d = 0; d < 30; d += 1) {
-    const day = new Date(todayUtc - (29 - d) * 86400000).toISOString().slice(0, 10);
+    // Last 30 completed UTC days: yesterday - 29 through yesterday
+    const day = new Date(today - (30 - d) * 86400000).toISOString().slice(0, 10);
     const row = rowByDay.get(day);
+    const cov = dayCoverage.get(day);
     if (!row) {
-      result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", completeness: "missing" });
+      const completeness: "complete" | "partial" | "missing" = cov?.coverage === 1 ? "missing" : "missing";
+      result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", completeness });
       continue;
     }
 
-    // Day completeness: a day is "complete" when every height in the day's
-    // range is indexed or verified empty. If any height is failed or missing,
-    // the day is "partial". Since we don't yet have per-height-to-day mapping
-    // for ALL heights (only for those with settlement facts), we mark every
-    // present day as "partial" by default. Once the migration populates
-    // block_time for empty heights, we'll be able to compute true completeness.
-    const completeness: "complete" | "partial" | "missing" = migrationComplete ? "partial" : "partial";
+    const completeness: "complete" | "partial" | "missing" =
+      cov && cov.coverage >= 1 && cov.totalHeights > 0 ? "complete" : "partial";
 
     const serialized = serializeDailyCache([row], migrationComplete)[0];
     result.push({ ...serialized, completeness });
   }
 
   return result;
+}
+
+function getDayCoverageMap(): Map<string, { coverage: number; totalHeights: number }> {
+  try {
+    const rows = getDayCoverage(1440);
+    const map = new Map<string, { coverage: number; totalHeights: number }>();
+    for (const r of rows) {
+      if (r.day) map.set(r.day, { coverage: r.coverage, totalHeights: r.total });
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
 }
 
 function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>, migrationComplete: boolean): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
@@ -860,8 +876,8 @@ export async function rebuildIndexerCaches(): Promise<void> {
   const jobId = startJobRun("indexer_cache_rebuild");
 
   try {
-    const latestHeight = Number(getIndexerState("last_processed_height") ?? 0);
-    const latestSeenHeight = Number(getIndexerState("latest_seen_height") ?? latestHeight);
+    const latestHeight = Number(getIndexerState("contiguous_processed_height") ?? 0);
+    const latestSeenHeight = Number(getIndexerState("highest_seen_height") ?? latestHeight);
     const latestFact = getLatestIndexedFact();
     const poktPriceUsd = await refreshPrice();
     const liveSuppliersPerSession = sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
@@ -1022,7 +1038,7 @@ async function fetchBlockFactsWithRetries(height: number, rpcUrls = RPC_URLS): P
 async function processHeight(height: number, rpcUrls = RPC_URLS): Promise<boolean> {
   try {
     const facts = await fetchBlockFactsWithRetries(height, rpcUrls);
-    const blockTime = facts.length > 0 ? facts[0].blockTime * 1000 : (await fetchBlockTimeMs(height, rpcUrls));
+    const blockTime = facts.length > 0 ? facts[0].blockTime : (await fetchBlockTimeMs(height, rpcUrls));
     saveIndexedBlock(height, facts, blockTime ?? undefined);
     if (facts.length > 0) cacheDirty = true;
     return true;
@@ -1143,7 +1159,7 @@ async function processRange(fromHeight: number, toHeight: number, maxBlocks?: nu
   for (let height = fromHeight; height <= targetHeight; height += 1) {
     await processHeight(height);
     if (height % 25 === 0 || height === targetHeight) {
-      setIndexerState("latest_seen_height", String(toHeight));
+      setIndexerState("highest_seen_height", String(toHeight));
       await maybeRebuildCaches();
       logInfo("Indexed block range progress", { height, targetHeight });
     }
@@ -1215,7 +1231,7 @@ async function processBackfillRange(fromHeight: number, toHeight: number, maxBlo
     }
 
     processedBlocks += heights.length;
-    setIndexerState("latest_seen_height", String(toHeight));
+    setIndexerState("highest_seen_height", String(toHeight));
     const elapsedMs = Date.now() - startedAt;
     const blocksPerMinute = elapsedMs === 0 ? 0 : Math.round((processedBlocks / elapsedMs) * 60_000);
     const remainingBlocks = Math.max(0, totalBlocks - processedBlocks);
@@ -1241,12 +1257,25 @@ function estimateBackfillStart(latestHeight: number, days: number): number {
   return Math.max(1, latestHeight - Math.ceil((days * 24 * 60 * 60) / averageBlockSeconds));
 }
 
+function backfillEmptyHeightMetadata(): void {
+  try {
+    const rows = getEmptyHeightsWithoutMetadata(1000);
+    for (const row of rows) {
+      const day = new Date(row.blockTime).toISOString().slice(0, 10);
+      updateHeightMetadata(row.height, row.blockTime, day);
+    }
+    logInfo("Empty height metadata backfill complete", { count: rows.length });
+  } catch (error) {
+    logError("Empty height metadata backfill failed", error);
+  }
+}
+
 async function runDataMigration(): Promise<void> {
   const storedVersion = Number(getIndexerState("data_version") ?? "0");
   if (storedVersion >= INDEXER_DATA_VERSION) return;
 
-  const latestHeight = Number(getIndexerState("last_processed_height") ?? 0);
-  const latestSeenHeight = Number(getIndexerState("latest_seen_height") ?? latestHeight);
+  const latestHeight = Number(getIndexerState("contiguous_processed_height") ?? 0);
+  const latestSeenHeight = Number(getIndexerState("highest_seen_height") ?? latestHeight);
   const retentionStartHeight = estimateBackfillStart(latestSeenHeight, RETENTION_DAYS);
 
   const coverage = getIndexedHeightCoverage(retentionStartHeight, latestHeight);
@@ -1284,6 +1313,9 @@ async function runDataMigration(): Promise<void> {
     return;
   }
 
+  logInfo("Backfilling block_time/day for empty indexed heights");
+  backfillEmptyHeightMetadata();
+
   setIndexerState("data_version", String(INDEXER_DATA_VERSION));
   await rebuildIndexerCaches();
   logInfo("Data migration complete", { version: INDEXER_DATA_VERSION, reprocessedHeights: indexedHeights.length });
@@ -1291,7 +1323,7 @@ async function runDataMigration(): Promise<void> {
 
 async function runCatchup(options: IndexerOptions): Promise<void> {
   const latestHeight = options.toHeight ?? await getLatestHeight();
-  const checkpoint = Number(getIndexerState("last_processed_height") ?? 0);
+  const checkpoint = Number(getIndexerState("contiguous_processed_height") ?? 0);
   const configuredStart = Number(process.env.POCKET_INDEXER_START_HEIGHT ?? 0);
   const isImplicitLiveCatchup = Boolean(options.live && !options.backfillDays && !options.fromHeight && !options.toHeight);
   let fromHeight = options.fromHeight
@@ -1310,7 +1342,7 @@ async function runCatchup(options: IndexerOptions): Promise<void> {
     fromHeight = latestHeight;
   }
 
-  setIndexerState("latest_seen_height", String(latestHeight));
+  setIndexerState("highest_seen_height", String(latestHeight));
   if (fromHeight <= latestHeight) {
     if (options.live && !options.backfillDays && !options.fromHeight && !options.toHeight) {
       await processRange(fromHeight, latestHeight, options.maxBlocks);
@@ -1330,10 +1362,10 @@ async function runLiveCatchup(maxBlocks = LIVE_CATCHUP_MAX_BLOCKS): Promise<void
   liveCatchupInFlight = true;
   try {
     const latestHeight = await getLatestHeight();
-    const checkpoint = Number(getIndexerState("last_processed_height") ?? 0);
+    const checkpoint = Number(getIndexerState("contiguous_processed_height") ?? 0);
     let fromHeight = checkpoint > 0 ? checkpoint + 1 : latestHeight;
 
-    setIndexerState("latest_seen_height", String(latestHeight));
+    setIndexerState("highest_seen_height", String(latestHeight));
     if (latestHeight - fromHeight + 1 > LIVE_CATCHUP_MAX_BLOCKS) {
       logWarn("Skipping stale live catchup", {
         checkpoint,
@@ -1432,8 +1464,8 @@ async function runLive(): Promise<void> {
           if (!height) return;
 
           void (async () => {
-            const checkpoint = Number(getIndexerState("last_processed_height") ?? 0);
-            setIndexerState("latest_seen_height", String(height));
+            const checkpoint = Number(getIndexerState("contiguous_processed_height") ?? 0);
+            setIndexerState("highest_seen_height", String(height));
             if (height > checkpoint) {
               const fromHeight = checkpoint > 0 ? checkpoint + 1 : height;
               const gapBlocks = height - fromHeight;

@@ -16,7 +16,6 @@ type GraphQLMetadataResponse = {
 
 export type IndexedGraphQLSettlement = {
   id: string;
-  sessionEndHeight: number;
   blockHeight: number;
   blockTime: number;
   serviceId: string;
@@ -27,12 +26,6 @@ export type IndexedGraphQLSettlement = {
   numEstimatedComputeUnits: number;
   claimedAmount: string;
   settledAmount: string;
-};
-
-export type GraphQLWatermark = {
-  lastIngestedHeight: number | null;
-  lastIngestedTime: string | null;
-  lastHealthyTime: string | null;
 };
 
 async function fetchGraphQL<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
@@ -66,91 +59,94 @@ export async function fetchGraphQLMetadata(): Promise<GraphQLMetadata | null> {
 export async function isGraphQLHealthy(): Promise<boolean> {
   const meta = await fetchGraphQLMetadata();
   if (!meta) return false;
-  return meta.indexerHealthy === true && (meta.lastProcessedHeight ?? 0) > 0;
+  if (meta.lastFinalizedVerifiedHeight == null || meta.indexerHealthy !== true) return false;
+  return (meta.lastProcessedHeight ?? 0) > 0;
 }
 
-export async function fetchSettlementsByHeightRange(
+type BlockNode = {
+  height: string;
+  header: { time: string };
+  eventClaimSettledsByBlockId: {
+    nodes: Array<{
+      id: string;
+      serviceId: string;
+      supplierId: string;
+      supplierOwnerId: string | null;
+      numRelays: string;
+      numEstimatedRelays: string | null;
+      numEstimatedComputeUnits: string | null;
+      claimedAmount: string | null;
+      settledAmount: string | null;
+    }>;
+    pageInfo: { endCursor: string | null; hasNextPage: boolean };
+  };
+};
+
+type BlocksResponse = {
+  blocks: {
+    nodes: BlockNode[];
+    pageInfo: { endCursor: string | null; hasNextPage: boolean };
+  };
+};
+
+export async function fetchSettlementsByBlockRange(
   fromHeight: number,
-  toHeight: number,
-  limit = 500
+  toHeight: number
 ): Promise<IndexedGraphQLSettlement[]> {
-  const query = `query($from: BigInt!, $to: BigInt!, $first: Int!) {
-    eventClaimSettleds(
-      filter: { sessionEndHeight: { greaterThanOrEqualTo: $from, lessThanOrEqualTo: $to } }
-      orderBy: SESSION_END_HEIGHT_ASC
-      first: $first
-    ) {
-      nodes {
-        id
-        sessionEndHeight
-        serviceId
-        supplierId
-        supplierOwnerId
-        numRelays
-        numEstimatedRelays
-        numEstimatedComputedUnits
-        claimedAmount
-        claimedDenom
-        settledAmount
-        settledDenom
-        blockId
-        block {
+  const results: IndexedGraphQLSettlement[] = [];
+  let from = fromHeight;
+
+  while (from <= toHeight) {
+    const batchTo = Math.min(from + 200, toHeight);
+    const query = `query($from: BigInt!, $to: BigInt!) {
+      blocks(
+        filter: { height: { greaterThanOrEqualTo: $from, lessThanOrEqualTo: $to } }
+        orderBy: HEIGHT_ASC
+        first: 500
+      ) {
+        nodes {
           height
           header
+          eventClaimSettledsByBlockId(first: 500) {
+            nodes {
+              id
+              serviceId
+              supplierId
+              supplierOwnerId
+              numRelays
+              numEstimatedRelays
+              numEstimatedComputeUnits
+              claimedAmount
+              settledAmount
+            }
+          }
         }
       }
-      pageInfo { endCursor hasNextPage }
+    }`;
+
+    const data = await fetchGraphQL<BlocksResponse>(query, { from: String(from), to: String(batchTo) });
+    for (const block of data.blocks.nodes) {
+      const blockTime = Date.parse(block.header?.time ?? "");
+      for (const node of block.eventClaimSettledsByBlockId.nodes) {
+        results.push({
+          id: node.id,
+          blockHeight: Number(block.height),
+          blockTime: Number.isFinite(blockTime) ? blockTime : 0,
+          serviceId: node.serviceId,
+          supplierId: node.supplierId,
+          ownerId: node.supplierOwnerId ?? null,
+          numRelays: Number(node.numRelays || 0),
+          numEstimatedRelays: Number(node.numEstimatedRelays || 0),
+          numEstimatedComputeUnits: Number(node.numEstimatedComputeUnits || 0),
+          claimedAmount: node.claimedAmount ?? "0",
+          settledAmount: node.settledAmount ?? "0",
+        });
+      }
     }
-  }`;
+    from = batchTo + 1;
+  }
 
-  const data = await fetchGraphQL<{
-    eventClaimSettleds: {
-      nodes: Array<{
-        id: string;
-        sessionEndHeight: string;
-        serviceId: string;
-        supplierId: string;
-        supplierOwnerId: string | null;
-        numRelays: string;
-        numEstimatedRelays: string | null;
-        numEstimatedComputeUnits: string | null;
-        claimedAmount: string | null;
-        claimedDenom: string | null;
-        settledAmount: string | null;
-        settledDenom: string | null;
-        blockId: string;
-        block: { height: string; header: { time: string } } | null;
-      }>;
-      pageInfo: { endCursor: string | null; hasNextPage: boolean };
-    };
-  }>(query, { from: String(fromHeight), to: String(toHeight), first: limit });
-
-  return data.eventClaimSettleds.nodes.map((node) => {
-    const blockTime = node.block?.header?.time
-      ? Date.parse(node.block.header.time)
-      : 0;
-    return {
-      id: node.id,
-      sessionEndHeight: Number(node.sessionEndHeight || 0),
-      blockHeight: Number(node.block?.height || 0),
-      blockTime: Number.isFinite(blockTime) ? blockTime : 0,
-      serviceId: node.serviceId,
-      supplierId: node.supplierId,
-      ownerId: node.supplierOwnerId ?? null,
-      numRelays: Number(node.numRelays || 0),
-      numEstimatedRelays: Number(node.numEstimatedRelays || 0),
-      numEstimatedComputeUnits: Number(node.numEstimatedComputeUnits || 0),
-      claimedAmount: node.claimedAmount ?? "0",
-      settledAmount: node.settledAmount ?? "0",
-    };
-  });
-}
-
-export async function fetchSettlementsForHeight(
-  height: number,
-  limit = 500
-): Promise<IndexedGraphQLSettlement[]> {
-  return fetchSettlementsByHeightRange(height, height, limit);
+  return results;
 }
 
 export async function updateGraphQLWatermark(): Promise<void> {

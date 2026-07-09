@@ -23,6 +23,8 @@ export type IndexedSettlementFact = {
   claimedComputeUnits?: number;
   estimatedComputeUnits?: number;
   revenueUpokt: string;
+  ingestionSource?: string;
+  sourceRecordId?: string;
 };
 
 export type IndexedService = {
@@ -434,7 +436,9 @@ const insertSettlementFactStatement = db.prepare(
       estimated_relays,
       claimed_compute_units,
       estimated_compute_units,
-      revenue_upokt
+      revenue_upokt,
+      ingestion_source,
+      source_record_id
     ) VALUES (
       @height,
       @event_index,
@@ -448,12 +452,16 @@ const insertSettlementFactStatement = db.prepare(
       @estimated_relays,
       @claimed_compute_units,
       @estimated_compute_units,
-      @revenue_upokt
+      @revenue_upokt,
+      @ingestion_source,
+      @source_record_id
     )
     ON CONFLICT(height, event_index) DO UPDATE SET
       estimated_relays = COALESCE(excluded.estimated_relays, settlement_facts.estimated_relays),
       claimed_compute_units = COALESCE(excluded.claimed_compute_units, settlement_facts.claimed_compute_units),
-      estimated_compute_units = COALESCE(excluded.estimated_compute_units, settlement_facts.estimated_compute_units)
+      estimated_compute_units = COALESCE(excluded.estimated_compute_units, settlement_facts.estimated_compute_units),
+      ingestion_source = excluded.ingestion_source,
+      source_record_id = COALESCE(excluded.source_record_id, settlement_facts.source_record_id)
   `
 );
 
@@ -505,6 +513,26 @@ const checkGapHeightsStatement = db.prepare(
 
 const selectFailedHeightsStatement = db.prepare(
   "SELECT height FROM indexed_heights WHERE status = 'failed' ORDER BY failure_count ASC, height DESC LIMIT ?"
+);
+
+const selectDayCoverageStatement = db.prepare(
+  `
+    SELECT
+      day,
+      CAST(COUNT(*) * 1.0 / NULLIF(?, 0) AS REAL) AS coverage,
+      CAST(COUNT(*) AS INTEGER) AS total
+    FROM indexed_heights
+    WHERE day IS NOT NULL AND status IN ('indexed', 'empty')
+    GROUP BY day
+  `
+);
+
+const selectEmptyHeightsWithoutMetadataStatement = db.prepare(
+  "SELECT ih.height, sb.block_time FROM indexed_heights ih JOIN settlement_blocks sb ON sb.height = ih.height WHERE ih.status = 'empty' AND ih.block_time IS NULL ORDER BY ih.height LIMIT ?"
+);
+
+const updateHeightMetadataStatement = db.prepare(
+  "UPDATE indexed_heights SET block_time = @block_time, day = @day WHERE height = @height"
 );
 
 const deleteOldSettlementFactsStatement = db.prepare("DELETE FROM settlement_facts WHERE block_time < ?");
@@ -652,7 +680,9 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
       estimated_relays: fact.estimatedRelays ?? null,
       claimed_compute_units: fact.claimedComputeUnits ?? null,
       estimated_compute_units: fact.estimatedComputeUnits ?? null,
-      revenue_upokt: fact.revenueUpokt
+      revenue_upokt: fact.revenueUpokt,
+      ingestion_source: fact.ingestionSource ?? "rpc",
+      source_record_id: fact.sourceRecordId ?? null
     });
   }
 
@@ -668,8 +698,14 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
     source
   });
 
-  setIndexerState("highest_seen_height", String(height));
-  setIndexerState("highest_ingested_height", String(height));
+  const currentSeen = Number(getIndexerState("highest_seen_height") ?? 0);
+  if (height > currentSeen) {
+    setIndexerState("highest_seen_height", String(height));
+  }
+  const currentIngested = Number(getIndexerState("highest_ingested_height") ?? 0);
+  if (height > currentIngested) {
+    setIndexerState("highest_ingested_height", String(height));
+  }
 
   const currentContiguous = Number(getIndexerState("contiguous_processed_height") ?? 0);
   if (height === currentContiguous + 1) {
@@ -684,19 +720,7 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
     }
     setIndexerState("contiguous_processed_height", String(next));
   } else if (height > currentContiguous) {
-    // Rebuild contiguous from base forward when advancing past current
-    const remaining = checkGapHeightsStatement.all(0, height) as Array<{ height: number; status: string }>;
-    let contiguous = 0;
-    for (const row of remaining) {
-      if (row.status === "indexed" || row.status === "empty") {
-        contiguous = Math.max(contiguous, row.height);
-      } else {
-        break;
-      }
-    }
-    if (contiguous > currentContiguous && contiguous >= height - 1) {
-      setIndexerState("contiguous_processed_height", String(Math.min(contiguous, height)));
-    }
+    setIndexerState("contiguous_processed_height", String(Math.max(currentContiguous, height)));
   }
 });
 
@@ -791,7 +815,7 @@ export function setIndexerState(key: string, value: string): void {
 }
 
 export function saveIndexedBlock(height: number, facts: IndexedSettlementFact[], blockTime?: number, source = "rpc"): void {
-  const day = blockTime != null ? new Date(blockTime * 1000).toISOString().slice(0, 10) : null;
+  const day = blockTime != null ? new Date(blockTime).toISOString().slice(0, 10) : null;
   writeIndexedBlockTransaction(height, facts, blockTime ?? null, day, source);
 }
 
@@ -805,6 +829,29 @@ export function markIndexedHeightFailed(height: number, error: string, source = 
   const current = Number(getIndexerState("highest_seen_height") ?? 0);
   if (height > current) {
     setIndexerState("highest_seen_height", String(height));
+  }
+}
+
+export function getEmptyHeightsWithoutMetadata(limit: number): Array<{ height: number; blockTime: number }> {
+  try {
+    return (selectEmptyHeightsWithoutMetadataStatement.all(limit) as Array<{ height: number; block_time: number }>)
+      .map((r) => ({ height: r.height, blockTime: r.block_time }));
+  } catch {
+    return [];
+  }
+}
+
+export function updateHeightMetadata(height: number, blockTime: number, day: string): void {
+  try {
+    updateHeightMetadataStatement.run({ height, block_time: blockTime, day });
+  } catch { /* non-critical */ }
+}
+
+export function getDayCoverage(blocksPerDay: number): Array<{ day: string; coverage: number; total: number }> {
+  try {
+    return selectDayCoverageStatement.all(blocksPerDay) as Array<{ day: string; coverage: number; total: number }>;
+  } catch {
+    return [];
   }
 }
 
