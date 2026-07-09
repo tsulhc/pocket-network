@@ -713,12 +713,15 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
 
   const currentContiguous = Number(getIndexerState("contiguous_processed_height") ?? 0);
   // Scan forward from current contiguous boundary, advancing through
-  // every consecutive indexed|empty height
+  // every consecutive indexed|empty height. Bounded at 10000 to avoid
+  // startup storms on fresh DBs with large gaps.
   let next = currentContiguous;
-  while (true) {
+  let scanned = 0;
+  while (scanned < 10000) {
     const row = checkHeightCoverageStatement.get(next + 1) as { status: string } | undefined;
     if (row && (row.status === "indexed" || row.status === "empty")) {
       next += 1;
+      scanned += 1;
     } else {
       break;
     }
