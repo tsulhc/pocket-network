@@ -8,7 +8,8 @@ import {
   getIndexerState,
   insertGraphQLSettlementFacts,
   setIndexerState,
-  updateHeightMetadata,
+  updateHeightTimestamp,
+  completeVerifiedEmptyHeight,
 } from "@/lib/db";
 import {
   fetchSettlementsByBlockRange,
@@ -80,7 +81,7 @@ async function repairHeightViaGraphQL(height: number): Promise<number> {
     }
     // Save block metadata (header) regardless of settlement presence
     if (blockTime != null && Number.isFinite(blockTime)) {
-      updateHeightMetadata(height, blockTime, new Date(blockTime).toISOString().slice(0, 10));
+      updateHeightTimestamp(height, blockTime, new Date(blockTime).toISOString().slice(0, 10));
     }
 
     if (result.settlements.length === 0) {
@@ -156,7 +157,7 @@ export async function repairEmptyBlockMetadata(): Promise<number> {
       const headers = await fetchBlockHeadersByRange(fromHeight, Math.min(toHeight, batchTargets.at(-1) ?? toHeight));
       for (const [height, blockTime] of headers) {
         if (!targetSet.has(height)) continue;
-        updateHeightMetadata(height, blockTime, new Date(blockTime).toISOString().slice(0, 10));
+        completeVerifiedEmptyHeight(height, blockTime, new Date(blockTime).toISOString().slice(0, 10));
         updated += 1;
       }
     }

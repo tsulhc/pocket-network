@@ -596,12 +596,12 @@ const selectEmptyHeightsWithoutMetadataStatement = db.prepare(
   "SELECT ih.height, sb.block_time FROM indexed_heights ih JOIN settlement_blocks sb ON sb.height = ih.height WHERE ih.status = 'empty' AND ih.block_time IS NULL ORDER BY ih.height LIMIT ?"
 );
 
-const updateHeightMetadataStatement = db.prepare(
+const updateHeightTimestampStatement = db.prepare(
   "UPDATE indexed_heights SET block_time = @block_time, day = @day WHERE height = @height"
 );
 
-const metadataUpdateStatement = db.prepare(
-  "UPDATE indexed_heights SET block_time = @block_time, day = @day, block_complete = 1, workload_complete = 1, reward_complete = 1 WHERE height = @height"
+const completeVerifiedEmptyHeightStatement = db.prepare(
+  "UPDATE indexed_heights SET block_time = @block_time, day = @day, block_complete = 1, workload_complete = 1, reward_complete = 1 WHERE height = @height AND status = 'empty'"
 );
 
 const deleteOldSettlementFactsStatement = db.prepare("DELETE FROM settlement_facts WHERE block_time < ?");
@@ -928,9 +928,15 @@ export function getEmptyHeightsWithoutMetadata(limit: number): Array<{ height: n
   }
 }
 
-export function updateHeightMetadata(height: number, blockTime: number, day: string): void {
+export function updateHeightTimestamp(height: number, blockTime: number, day: string): void {
   try {
-    metadataUpdateStatement.run({ height, block_time: blockTime, day });
+    updateHeightTimestampStatement.run({ height, block_time: blockTime, day });
+  } catch { /* non-critical */ }
+}
+
+export function completeVerifiedEmptyHeight(height: number, blockTime: number, day: string): void {
+  try {
+    completeVerifiedEmptyHeightStatement.run({ height, block_time: blockTime, day });
   } catch { /* non-critical */ }
 }
 
@@ -953,10 +959,10 @@ export function getDailyHeightCoverage(dayStartMs: number, nextDayStartMs: numbe
   // must have block_time < dayStartMs — otherwise we jumped past the true
   // first block of the day and are undercounting the expected range.
   const prev = db.prepare("SELECT block_time FROM indexed_heights WHERE height = ? AND block_time IS NOT NULL").get(start.height - 1) as { block_time: number } | undefined;
-  if (prev && prev.block_time >= dayStartMs) return null;
+  if (!prev || prev.block_time >= dayStartMs) return null;
 
   const expNext = db.prepare("SELECT block_time FROM indexed_heights WHERE height = ? AND block_time IS NOT NULL").get(next.height - 1) as { block_time: number } | undefined;
-  if (expNext && expNext.block_time >= nextDayStartMs) return null;
+  if (!expNext || expNext.block_time >= nextDayStartMs) return null;
 
   const expectedHeights = next.height - start.height;
   const row = db.prepare(`

@@ -17,7 +17,8 @@ import {
   getLatestIndexedFact,
   getDailyHeightCoverage,
   getEmptyHeightsWithoutMetadata,
-  updateHeightMetadata,
+  updateHeightTimestamp,
+  completeVerifiedEmptyHeight,
   markIndexedHeightFailed,
   pruneIndexerData,
   pruneIndexedHeightCoverage,
@@ -1295,7 +1296,7 @@ function backfillEmptyHeightMetadata(): void {
       if (rows.length === 0) break;
       for (const row of rows) {
         const day = new Date(row.blockTime).toISOString().slice(0, 10);
-        updateHeightMetadata(row.height, row.blockTime, day);
+        completeVerifiedEmptyHeight(row.height, row.blockTime, day);
       }
       total += rows.length;
     }
