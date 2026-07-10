@@ -15,6 +15,7 @@ import {
   isGraphQLHealthy,
   fetchGraphQL,
   fetchGraphQLMetadata,
+  getSafeHeight,
 } from "@/lib/graphql";
 
 const CONCURRENCY = Number(process.env.POCKET_GRAPHQL_BOOTSTRAP_CONCURRENCY ?? 2);
@@ -58,7 +59,7 @@ function setBootstrapState(keyValues: Record<string, string | number | boolean>)
 
 async function bootstrapBlockHeaders(fromHeight: number, toHeight: number): Promise<BootstrapResult> {
   const meta = await fetchGraphQLMetadata();
-  const safeHeight = meta?.lastFinalizedVerifiedHeight ?? toHeight;
+  const safeHeight = getSafeHeight(meta, toHeight);
   const safeToHeight = Math.min(toHeight, safeHeight);
   const result: BootstrapResult = { headersImported: 0, eventsImported: 0, rangesCommitted: 0, rangesFailed: 0 };
 
@@ -124,13 +125,13 @@ export async function runGraphQLBootstrap(mode: BootstrapMode, fromHeight?: numb
   if (!healthy) throw new Error("GraphQL unhealthy — cannot bootstrap");
 
   const meta = await fetchGraphQLMetadata();
-  const safeHeight = meta?.lastFinalizedVerifiedHeight ?? toHeight ?? 0;
+  const safeHeight = getSafeHeight(meta, toHeight ?? 0);
 
   setBootstrapState({ mode, phase: "headers", safe_height: safeHeight });
 
   const totalResult: BootstrapResult = { headersImported: 0, eventsImported: 0, rangesCommitted: 0, rangesFailed: 0 };
 
-  const seenHeight = Number(getIndexerState("highest_seen_height") ?? meta?.lastFinalizedVerifiedHeight ?? 0);
+  const seenHeight = Number(getIndexerState("highest_seen_height") ?? getSafeHeight(meta, 0));
   const retentionDays = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
   const avgBlockSec = Math.max(1, Number(process.env.POCKET_INDEXER_AVG_BLOCK_SECONDS ?? 60));
   const retentionStart = Math.max(1, seenHeight - Math.ceil(retentionDays * 86400 / avgBlockSec));
@@ -212,7 +213,7 @@ async function getFirstHeightForRecent(): Promise<number> {
     );
     if (data.blocks.nodes.length > 0) return Number(data.blocks.nodes[0].height);
   } catch { }
-  const seen = Number(getIndexerState("highest_seen_height") ?? meta?.lastFinalizedVerifiedHeight ?? 0);
+  const seen = Number(getIndexerState("highest_seen_height") ?? getSafeHeight(meta, 0));
   return Math.max(1, seen - 1440 * 31);
 }
 

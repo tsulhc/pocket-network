@@ -59,8 +59,13 @@ export async function fetchGraphQLMetadata(): Promise<GraphQLMetadata | null> {
 export async function isGraphQLHealthy(): Promise<boolean> {
   const meta = await fetchGraphQLMetadata();
   if (!meta) return false;
-  if (meta.lastFinalizedVerifiedHeight == null || meta.indexerHealthy !== true) return false;
+  if (meta.indexerHealthy !== true) return false;
   return (meta.lastProcessedHeight ?? 0) > 0;
+}
+
+export function getSafeHeight(meta: { lastFinalizedVerifiedHeight?: number | null; lastProcessedHeight?: number | null } | null, fallback: number): number {
+  if (!meta) return fallback;
+  return meta.lastFinalizedVerifiedHeight ?? meta.lastProcessedHeight ?? fallback;
 }
 
 type BlockNode = {

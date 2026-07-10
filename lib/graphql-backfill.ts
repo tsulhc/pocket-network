@@ -72,7 +72,7 @@ function buildGraphQLSettlementRows(
 async function repairHeightViaGraphQL(height: number): Promise<number> {
   try {
     const meta = await fetchGraphQLMetadata();
-    if (!meta || meta.lastFinalizedVerifiedHeight == null || height > meta.lastFinalizedVerifiedHeight) {
+    if (!meta || height > (meta.lastFinalizedVerifiedHeight ?? meta.lastProcessedHeight ?? 0)) {
       return -1;
     }
 
