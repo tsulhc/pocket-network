@@ -181,17 +181,17 @@ export function getIndexerHealth(): IndexerHealth {
     let partialRewardHeights = 0;
     let missingHeights = 0;
     const processedH = processedHeight ? Number.parseInt(processedHeight, 10) || 0 : 0;
+    const seenH = targetHeight ? Number.parseInt(targetHeight, 10) || 0 : 0;
     const retentionDays = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
     const averageBlockSeconds = Math.max(1, Number(process.env.POCKET_INDEXER_AVG_BLOCK_SECONDS ?? 60));
     const retentionBlocks = Math.ceil((retentionDays * 86400) / averageBlockSeconds);
-    const retentionStartH = Math.max(1, processedH - retentionBlocks);
+    const retentionStartH = seenH > 0 ? Math.max(1, seenH - retentionBlocks + 1) : Math.max(1, processedH - retentionBlocks);
     try {
       const gapRow = selectGapCountStatement.get() as { gaps: number; failed: number } | undefined;
       if (gapRow) { gaps = gapRow.gaps; failedHeights = gapRow.failed; }
       emptyNullTimestamps = getEmptyNullTimestampCount();
       partialWorkloadHeights = getPartialWorkloadHeights();
       partialRewardHeights = getPartialRewardHeights();
-      const seenH = targetHeight ? Number.parseInt(targetHeight, 10) || 0 : 0;
       if (processedH > 0 && seenH > 0) {
         missingHeights = getMissingHeightCount(retentionStartH, seenH);
       }
@@ -545,14 +545,14 @@ const markIndexedHeightFailedStatement = db.prepare(
     INSERT INTO indexed_heights (height, status, scanned_at, event_count, failure_count, last_error, source)
     VALUES (@height, 'failed', @scanned_at, 0, 1, @last_error, @source)
     ON CONFLICT(height) DO UPDATE SET
-      status = 'failed',
+      status = CASE WHEN indexed_heights.status = 'partial' THEN 'partial' ELSE 'failed' END,
       scanned_at = excluded.scanned_at,
       failure_count = indexed_heights.failure_count + 1,
       last_error = excluded.last_error,
       source = excluded.source,
-      block_complete = 0,
-      workload_complete = 0,
-      reward_complete = 0
+      block_complete = CASE WHEN indexed_heights.status = 'partial' THEN indexed_heights.block_complete ELSE 0 END,
+      workload_complete = CASE WHEN indexed_heights.status = 'partial' THEN 1 ELSE 0 END,
+      reward_complete = CASE WHEN indexed_heights.status = 'partial' AND indexed_heights.reward_complete > 0 THEN 1 ELSE 0 END
   `
 );
 
@@ -598,6 +598,10 @@ const selectEmptyHeightsWithoutMetadataStatement = db.prepare(
 
 const updateHeightMetadataStatement = db.prepare(
   "UPDATE indexed_heights SET block_time = @block_time, day = @day WHERE height = @height"
+);
+
+const metadataUpdateStatement = db.prepare(
+  "UPDATE indexed_heights SET block_time = @block_time, day = @day, block_complete = 1, workload_complete = 1, reward_complete = 1 WHERE height = @height"
 );
 
 const deleteOldSettlementFactsStatement = db.prepare("DELETE FROM settlement_facts WHERE block_time < ?");
@@ -926,7 +930,7 @@ export function getEmptyHeightsWithoutMetadata(limit: number): Array<{ height: n
 
 export function updateHeightMetadata(height: number, blockTime: number, day: string): void {
   try {
-    updateHeightMetadataStatement.run({ height, block_time: blockTime, day });
+    metadataUpdateStatement.run({ height, block_time: blockTime, day });
   } catch { /* non-critical */ }
 }
 
@@ -944,6 +948,15 @@ export function getDailyHeightCoverage(dayStartMs: number, nextDayStartMs: numbe
   const start = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(dayStartMs) as { height: number | null };
   const next = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(nextDayStartMs) as { height: number | null };
   if (start.height == null || next.height == null || next.height <= start.height) return null;
+
+  // Verify both boundaries are reliable. The block immediately before start
+  // must have block_time < dayStartMs — otherwise we jumped past the true
+  // first block of the day and are undercounting the expected range.
+  const prev = db.prepare("SELECT block_time FROM indexed_heights WHERE height = ? AND block_time IS NOT NULL").get(start.height - 1) as { block_time: number } | undefined;
+  if (prev && prev.block_time >= dayStartMs) return null;
+
+  const expNext = db.prepare("SELECT block_time FROM indexed_heights WHERE height = ? AND block_time IS NOT NULL").get(next.height - 1) as { block_time: number } | undefined;
+  if (expNext && expNext.block_time >= nextDayStartMs) return null;
 
   const expectedHeights = next.height - start.height;
   const row = db.prepare(`

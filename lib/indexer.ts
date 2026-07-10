@@ -1075,7 +1075,7 @@ function getRepairCandidateHeights(fromHeight: number, toHeight: number, limit: 
   const partial: number[] = [];
   const now = Date.now();
 
-  for (let height = toHeight; height >= fromHeight && missing.length + failed.length < limit; height -= 1) {
+  for (let height = toHeight; height >= fromHeight && missing.length + failed.length + partial.length < limit; height -= 1) {
     const row = byHeight.get(height);
     if (!row) {
       missing.push(height);
@@ -1107,7 +1107,7 @@ async function processRepairHeights(heights: number[], concurrency: number, sour
       saveIndexedBlock(result.height, result.facts, result.blockTime, "rpc");
       repaired += 1;
       events += result.facts.length;
-      if (result.facts.length > 0) cacheDirty = true;
+      cacheDirty = true;
     } else {
       markIndexedHeightFailed(result.height, result.error ?? "Unknown block fetch error");
       failed += 1;
@@ -1253,7 +1253,7 @@ async function processBackfillRange(fromHeight: number, toHeight: number, maxBlo
       if (result.facts) {
         saveIndexedBlock(result.height, result.facts, result.blockTime, "rpc");
         indexedEvents += result.facts.length;
-        if (result.facts.length > 0) cacheDirty = true;
+        cacheDirty = true;
       } else {
         markIndexedHeightFailed(result.height, result.error ?? "Unknown block fetch error");
         failedBlocks += 1;
