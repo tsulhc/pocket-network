@@ -11,7 +11,6 @@ export async function GET() {
   const lag = Math.max(0, seenHeight - contiguousHeight);
 
   const degraded =
-    health.gaps > 0 ||
     health.failedHeights > 0 ||
     health.missingHeights > 0 ||
     health.emptyNullTimestamps > 0 ||
@@ -25,7 +24,7 @@ export async function GET() {
     indexer: {
       isLocked: health.isLocked,
       contiguousHeight,
-      ingestedHeight: health.ingestedHeight,
+      highestIngestedHeight: health.ingestedHeight,
       seenHeight,
       lag,
       gaps: health.gaps,

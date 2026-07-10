@@ -39,7 +39,7 @@ export type IndexedSupplierDomain = {
   hasEndpoint: boolean;
 };
 
-export type IndexedHeightStatus = "indexed" | "empty" | "failed";
+export type IndexedHeightStatus = "indexed" | "empty" | "partial" | "failed";
 
 export type IndexedHeightCoverage = {
   height: number;
@@ -51,6 +51,9 @@ export type IndexedHeightCoverage = {
   block_time: number | null;
   day: string | null;
   source: string;
+  block_complete: number;
+  workload_complete: number;
+  reward_complete: number;
 };
 
 export type IndexedServiceAggregate = {
@@ -177,9 +180,11 @@ export function getIndexerHealth(): IndexerHealth {
     let partialWorkloadHeights = 0;
     let partialRewardHeights = 0;
     let missingHeights = 0;
-    const retention = 45 * 24 * 60; // 45 days in minutes (blocks)
     const processedH = processedHeight ? Number.parseInt(processedHeight, 10) || 0 : 0;
-    const retentionStartH = Math.max(1, processedH - retention);
+    const retentionDays = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
+    const averageBlockSeconds = Math.max(1, Number(process.env.POCKET_INDEXER_AVG_BLOCK_SECONDS ?? 60));
+    const retentionBlocks = Math.ceil((retentionDays * 86400) / averageBlockSeconds);
+    const retentionStartH = Math.max(1, processedH - retentionBlocks);
     try {
       const gapRow = selectGapCountStatement.get() as { gaps: number; failed: number } | undefined;
       if (gapRow) { gaps = gapRow.gaps; failedHeights = gapRow.failed; }
@@ -518,8 +523,8 @@ const insertSettlementFactStatement = db.prepare(
 
 const upsertIndexedHeightStatement = db.prepare(
   `
-    INSERT INTO indexed_heights (height, status, scanned_at, event_count, failure_count, last_error, block_time, day, source)
-    VALUES (@height, @status, @scanned_at, @event_count, @failure_count, @last_error, @block_time, @day, @source)
+    INSERT INTO indexed_heights (height, status, scanned_at, event_count, failure_count, last_error, block_time, day, source, block_complete, workload_complete, reward_complete)
+    VALUES (@height, @status, @scanned_at, @event_count, @failure_count, @last_error, @block_time, @day, @source, @block_complete, @workload_complete, @reward_complete)
     ON CONFLICT(height) DO UPDATE SET
       status = excluded.status,
       scanned_at = excluded.scanned_at,
@@ -528,7 +533,10 @@ const upsertIndexedHeightStatement = db.prepare(
       last_error = excluded.last_error,
       block_time = COALESCE(excluded.block_time, indexed_heights.block_time),
       day = COALESCE(excluded.day, indexed_heights.day),
-      source = excluded.source
+      source = excluded.source,
+      block_complete = excluded.block_complete,
+      workload_complete = excluded.workload_complete,
+      reward_complete = excluded.reward_complete
   `
 );
 
@@ -541,13 +549,16 @@ const markIndexedHeightFailedStatement = db.prepare(
       scanned_at = excluded.scanned_at,
       failure_count = indexed_heights.failure_count + 1,
       last_error = excluded.last_error,
-      source = excluded.source
+      source = excluded.source,
+      block_complete = 0,
+      workload_complete = 0,
+      reward_complete = 0
   `
 );
 
 const selectIndexedHeightsStatement = db.prepare(
   `
-    SELECT height, status, event_count, failure_count, last_error, scanned_at, block_time, day, source
+    SELECT height, status, event_count, failure_count, last_error, scanned_at, block_time, day, source, block_complete, workload_complete, reward_complete
     FROM indexed_heights
     WHERE height BETWEEN ? AND ?
     ORDER BY height ASC
@@ -579,44 +590,6 @@ const selectEmptyNullTimestampStatement = db.prepare(
 
 const countEmptyNullTimestampStatement = db.prepare(
   "SELECT COUNT(*) AS count FROM indexed_heights WHERE status = 'empty' AND block_time IS NULL"
-);
-
-const selectDayCoverageStatement = db.prepare(
-  `
-    SELECT
-      day,
-      CAST(COUNT(*) * 1.0 / NULLIF(?, 0) AS REAL) AS coverage,
-      CAST(COUNT(*) AS INTEGER) AS total
-    FROM indexed_heights
-    WHERE day IS NOT NULL AND status IN ('indexed', 'empty')
-    GROUP BY day
-  `
-);
-
-const selectWorkloadCoverageStatement = db.prepare(
-  `
-    SELECT
-      day,
-      CAST(SUM(workload_complete) * 1.0 / NULLIF(COUNT(*), 0) AS REAL) AS ratio
-    FROM indexed_heights
-    WHERE day IS NOT NULL
-    GROUP BY day
-  `
-);
-
-const selectRewardCoverageStatement = db.prepare(
-  `
-    SELECT
-      day,
-      CAST(SUM(reward_complete) * 1.0 / NULLIF(COUNT(*), 0) AS REAL) AS ratio
-    FROM indexed_heights
-    WHERE day IS NOT NULL
-    GROUP BY day
-  `
-);
-
-const selectMaxDayHeightsStatement = db.prepare(
-  "SELECT MAX(cnt) AS max_count FROM (SELECT COUNT(*) AS cnt FROM indexed_heights WHERE day IS NOT NULL AND status IN ('indexed', 'empty') GROUP BY day)"
 );
 
 const selectEmptyHeightsWithoutMetadataStatement = db.prepare(
@@ -757,7 +730,10 @@ const selectDailyRollupsStatement = db.prepare(
   `
 );
 
-const writeIndexedBlockTransaction = db.transaction((height: number, facts: IndexedSettlementFact[], blockTime: number | null, day: string | null, source: string) => {
+const writeIndexedBlockTransaction = db.transaction((height: number, facts: IndexedSettlementFact[], blockTime: number, day: string, source: string) => {
+  if (!Number.isFinite(blockTime)) {
+    throw new Error(`Cannot save height ${height} without a block timestamp`);
+  }
   for (const fact of facts) {
     insertSettlementFactStatement.run({
       height: fact.height,
@@ -785,10 +761,19 @@ const writeIndexedBlockTransaction = db.transaction((height: number, facts: Inde
     event_count: facts.length,
     failure_count: 0,
     last_error: null,
-    block_time: blockTime ?? null,
-    day: day ?? null,
-    source
+    block_time: blockTime,
+    day,
+    source,
+    block_complete: 1,
+    workload_complete: 1,
+    reward_complete: 1
   });
+
+  // RPC is canonical. Any provisional GraphQL observations for this height
+  // are no longer needed once its reward has been reconciled by RPC.
+  if (source === "rpc") {
+    db.prepare("DELETE FROM graphql_settlement_facts WHERE height = ?").run(height);
+  }
 
   const currentSeen = Number(getIndexerState("highest_seen_height") ?? 0);
   if (height > currentSeen) {
@@ -910,8 +895,11 @@ export function setIndexerState(key: string, value: string): void {
 }
 
 export function saveIndexedBlock(height: number, facts: IndexedSettlementFact[], blockTime?: number, source = "rpc"): void {
-  const day = blockTime != null ? new Date(blockTime).toISOString().slice(0, 10) : null;
-  writeIndexedBlockTransaction(height, facts, blockTime ?? null, day, source);
+  if (!Number.isFinite(blockTime)) {
+    throw new Error(`Cannot save height ${height} without a block timestamp`);
+  }
+  const day = new Date(blockTime as number).toISOString().slice(0, 10);
+  writeIndexedBlockTransaction(height, facts, blockTime as number, day, source);
 }
 
 export function markIndexedHeightFailed(height: number, error: string, source = "rpc"): void {
@@ -942,33 +930,40 @@ export function updateHeightMetadata(height: number, blockTime: number, day: str
   } catch { /* non-critical */ }
 }
 
-export function getDayCoverage(blocksPerDay: number): Array<{ day: string; coverage: number; total: number }> {
-  try {
-    return selectDayCoverageStatement.all(blocksPerDay) as Array<{ day: string; coverage: number; total: number }>;
-  } catch {
-    return [];
-  }
-}
+export type DailyHeightCoverage = {
+  day: string;
+  expectedHeights: number;
+  blockCovered: number;
+  workloadCovered: number;
+  rewardCovered: number;
+  failed: number;
+  missing: number;
+};
 
-export function getWorkloadCoverage(): Array<{ day: string; ratio: number }> {
-  try {
-    return selectWorkloadCoverageStatement.all() as Array<{ day: string; ratio: number }>;
-  } catch { return []; }
-}
+export function getDailyHeightCoverage(dayStartMs: number, nextDayStartMs: number): Omit<DailyHeightCoverage, "day"> | null {
+  const start = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(dayStartMs) as { height: number | null };
+  const next = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(nextDayStartMs) as { height: number | null };
+  if (start.height == null || next.height == null || next.height <= start.height) return null;
 
-export function getRewardCoverage(): Array<{ day: string; ratio: number }> {
-  try {
-    return selectRewardCoverageStatement.all() as Array<{ day: string; ratio: number }>;
-  } catch { return []; }
-}
-
-export function getMaxDayHeights(): number {
-  try {
-    const row = selectMaxDayHeightsStatement.get() as { max_count: number } | undefined;
-    return row?.max_count ?? 1440;
-  } catch {
-    return 1440;
-  }
+  const expectedHeights = next.height - start.height;
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN block_complete = 1 THEN 1 ELSE 0 END) AS block_covered,
+      SUM(CASE WHEN workload_complete = 1 THEN 1 ELSE 0 END) AS workload_covered,
+      SUM(CASE WHEN reward_complete = 1 THEN 1 ELSE 0 END) AS reward_covered,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      COUNT(*) AS present
+    FROM indexed_heights
+    WHERE height BETWEEN ? AND ?
+  `).get(start.height, next.height - 1) as { block_covered: number | null; workload_covered: number | null; reward_covered: number | null; failed: number | null; present: number };
+  return {
+    expectedHeights,
+    blockCovered: row.block_covered ?? 0,
+    workloadCovered: row.workload_covered ?? 0,
+    rewardCovered: row.reward_covered ?? 0,
+    failed: row.failed ?? 0,
+    missing: Math.max(0, expectedHeights - (row.present ?? 0)),
+  };
 }
 
 export function getEmptyNullTimestampHeights(limit = 100): number[] {
@@ -1029,21 +1024,26 @@ export function deleteGraphQLSettlementFactsForHeight(height: number): void {
 }
 
 export function savePartialBlock(height: number, blockTime?: number): void {
+  if (!Number.isFinite(blockTime)) {
+    throw new Error(`Cannot save partial height ${height} without a block timestamp`);
+  }
   const day = blockTime != null ? new Date(blockTime).toISOString().slice(0, 10) : null;
   upsertIndexedHeightStatement.run({
     height,
-    status: "indexed",
+    status: "partial",
     scanned_at: new Date().toISOString(),
     event_count: 0,
     failure_count: 0,
     last_error: null,
-    block_time: blockTime ?? null,
-    day: day ?? null,
+    block_time: blockTime,
+    day,
     source: "graphql",
+    block_complete: 1,
+    workload_complete: 1,
+    reward_complete: 0,
   });
-  setIndexerState("highest_ingested_height", String(height));
-  // Also mark completeness: block+workload=1, reward=0 (GraphQL settlements are staging only)
-  try { db.prepare("UPDATE indexed_heights SET block_complete=1, workload_complete=1, reward_complete=0 WHERE height=?").run(height); } catch {}
+  const currentIngested = Number(getIndexerState("highest_ingested_height") ?? 0);
+  if (height > currentIngested) setIndexerState("highest_ingested_height", String(height));
 }
 
 export function getEmptyNullTimestampHeightsInRange(
@@ -1060,16 +1060,21 @@ export function getEmptyNullTimestampHeightsInRange(
   } catch { return []; }
 }
 
+export function getFirstHeightAtOrAfter(timestampMs: number): number | null {
+  const row = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(timestampMs) as { height: number | null };
+  return row.height ?? null;
+}
+
 export function getPartialWorkloadHeights(): number {
   try {
-    const row = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE workload_complete=0 AND status IN ('empty','indexed')").get() as { c: number };
+    const row = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE workload_complete=0 AND status IN ('empty','indexed','partial')").get() as { c: number };
     return row?.c ?? 0;
   } catch { return 0; }
 }
 
 export function getPartialRewardHeights(): number {
   try {
-    const row = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE reward_complete=0 AND status IN ('empty','indexed')").get() as { c: number };
+    const row = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE reward_complete=0 AND status IN ('empty','indexed','partial')").get() as { c: number };
     return row?.c ?? 0;
   } catch { return 0; }
 }
@@ -1079,6 +1084,103 @@ export function getMissingHeightCount(_retentionStartHeight: number, retentionEn
     const present = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE height BETWEEN ? AND ?").get(_retentionStartHeight, retentionEndHeight) as { c: number };
     return Math.max(0, (retentionEndHeight - _retentionStartHeight + 1) - (present?.c ?? 0));
   } catch { return 0; }
+}
+
+export function migrateV3ToV4(): { migratedGraphQLFacts: number; partialHeights: number } {
+  return db.transaction(() => {
+    const legacyFacts = db.prepare(`
+      SELECT height, event_index, block_time, day, service_id, supplier_hash, owner_hash,
+        relays, estimated_relays, estimated_compute_units, revenue_upokt, source_record_id
+      FROM settlement_facts
+      WHERE ingestion_source = 'graphql'
+    `).all() as Array<{
+      height: number;
+      event_index: number;
+      block_time: number;
+      day: string;
+      service_id: string;
+      supplier_hash: string;
+      owner_hash: string | null;
+      relays: number;
+      estimated_relays: number | null;
+      estimated_compute_units: number | null;
+      revenue_upokt: string;
+      source_record_id: string | null;
+    }>;
+
+    if (legacyFacts.some((fact) => BigInt(fact.revenue_upokt) !== 0n)) {
+      throw new Error("Refusing v4 migration: legacy GraphQL facts carry canonical revenue");
+    }
+
+    const now = new Date().toISOString();
+    for (const fact of legacyFacts) {
+      let sourceRecordId = `legacy:${fact.height}:${fact.event_index}`;
+      let claimedAmount: string | null = null;
+      let settledAmount: string | null = null;
+      if (fact.source_record_id) {
+        try {
+          const source = JSON.parse(fact.source_record_id) as { graphqlId?: string; claimedAmount?: string; settledAmount?: string };
+          sourceRecordId = source.graphqlId ?? sourceRecordId;
+          claimedAmount = source.claimedAmount ?? null;
+          settledAmount = source.settledAmount ?? null;
+        } catch {
+          sourceRecordId = fact.source_record_id;
+        }
+      }
+      insertGraphQLSettlementFactStatement.run({
+        source_record_id: sourceRecordId,
+        height: fact.height,
+        block_time: fact.block_time,
+        day: fact.day,
+        service_id: fact.service_id,
+        supplier_hash: fact.supplier_hash,
+        owner_hash: fact.owner_hash,
+        relays: fact.relays,
+        estimated_relays: fact.estimated_relays,
+        estimated_compute_units: fact.estimated_compute_units,
+        claimed_amount: claimedAmount,
+        settled_amount: settledAmount,
+        fetched_at: now,
+      });
+    }
+    if (legacyFacts.length > 0) {
+      db.prepare("DELETE FROM settlement_facts WHERE ingestion_source = 'graphql'").run();
+    }
+
+    // Historical RPC and verified GraphQL empties are complete. GraphQL
+    // settlement observations remain partial until a canonical RPC repair.
+    db.prepare(`
+      UPDATE indexed_heights
+      SET status = CASE WHEN event_count > 0 THEN 'indexed' ELSE 'empty' END,
+        block_complete = 1, workload_complete = 1, reward_complete = 1
+      WHERE block_time IS NOT NULL AND source = 'rpc' AND status IN ('indexed', 'empty', 'partial')
+    `).run();
+    db.prepare(`
+      UPDATE indexed_heights
+      SET status = 'partial', block_complete = 1, workload_complete = 1, reward_complete = 0
+      WHERE source = 'graphql' AND status = 'indexed'
+        AND EXISTS (SELECT 1 FROM graphql_settlement_facts g WHERE g.height = indexed_heights.height)
+    `).run();
+    db.prepare(`
+      UPDATE indexed_heights
+      SET block_complete = 1, workload_complete = 1, reward_complete = 1
+      WHERE block_time IS NOT NULL AND source = 'graphql' AND status = 'empty'
+    `).run();
+    db.prepare(`
+      UPDATE indexed_heights
+      SET block_complete = 0, workload_complete = 0, reward_complete = 0
+      WHERE status = 'failed' OR block_time IS NULL
+    `).run();
+
+    const maxIngested = db.prepare("SELECT MAX(height) AS height FROM indexed_heights WHERE status IN ('indexed', 'empty', 'partial')").get() as { height: number | null };
+    const currentIngested = Number(getIndexerState("highest_ingested_height") ?? 0);
+    if (maxIngested.height != null && maxIngested.height > currentIngested) {
+      setIndexerState("highest_ingested_height", String(maxIngested.height));
+    }
+
+    const partial = db.prepare("SELECT COUNT(*) AS count FROM indexed_heights WHERE status = 'partial'").get() as { count: number };
+    return { migratedGraphQLFacts: legacyFacts.length, partialHeights: partial.count };
+  })();
 }
 
 export function getFailedHeights(limit = 100): number[] {

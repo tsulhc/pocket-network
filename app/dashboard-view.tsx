@@ -86,15 +86,16 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
     workloadCompleteness: point.workloadCompleteness ?? "complete",
     rewardCompleteness: point.rewardCompleteness ?? "complete"
   }));
-  const rewardCompleteOnly = trendPoints.filter((p) => p.rewardCompleteness === "complete" && p.revenue > 0);
+  const rewardCompleteOnly = trendPoints.filter((p) => p.rewardCompleteness === "complete");
+  const workloadCompleteOnly = trendPoints.filter((p) => p.workloadCompleteness === "complete");
   const maxRevenue = Math.max(...(rewardCompleteOnly.length > 0 ? rewardCompleteOnly : trendPoints).map((point) => point.revenue), 0);
   const maxCULoad = Math.max(...trendPoints.map((point) => point.cuLoad), 0);
-  const latestRewardPoint = rewardCompleteOnly.length > 0 ? rewardCompleteOnly.at(-1) : trendPoints.at(-1);
-  const latestWorkloadPoint = trendPoints.filter((p) => p.workloadCompleteness === "complete").at(-1) ?? trendPoints.at(-1);
+  const latestRewardPoint = rewardCompleteOnly.at(-1);
+  const latestWorkloadPoint = workloadCompleteOnly.at(-1);
   const totalRevenue = rewardCompleteOnly.reduce((sum, point) => sum + point.revenue, 0);
   const totalRewardDays = rewardCompleteOnly.length;
-  const totalCULoad = trendPoints.reduce((sum, point) => sum + point.cuLoad, 0);
-  const totalWorkloadDays = trendPoints.filter((p) => p.workloadCompleteness === "complete").length;
+  const totalCULoad = workloadCompleteOnly.reduce((sum, point) => sum + point.cuLoad, 0);
+  const totalWorkloadDays = workloadCompleteOnly.length;
   const linePaths = buildNetworkTrendPaths(trendPoints, maxRevenue);
   const hasData = trendPoints.some((point) => {
     if (point.rewardCompleteness === "complete" && point.revenue > 0) return true;

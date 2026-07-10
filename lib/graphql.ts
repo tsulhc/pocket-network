@@ -181,7 +181,7 @@ export async function fetchBlockHeadersByRange(fromHeight: number, toHeight: num
   let from = fromHeight;
 
   while (from <= toHeight) {
-    const batchTo = Math.min(from + 500, toHeight);
+    const batchTo = Math.min(from + 499, toHeight);
     const query = `query($from: BigInt!, $to: BigInt!) {
       blocks(
         filter: { height: { greaterThanOrEqualTo: $from, lessThanOrEqualTo: $to } }

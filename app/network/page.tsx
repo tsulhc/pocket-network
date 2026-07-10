@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { formatInteger, formatPercent } from "@/lib/format";
-import { getIndexedHeightCoverage, getIndexerState } from "@/lib/db";
+import { getIndexedHeightCoverage, getIndexerHealth, getIndexerState } from "@/lib/db";
 
 export const metadata = {
   title: "Network Status | Pocket Network Analytics",
@@ -10,13 +10,6 @@ export const metadata = {
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-
-function getNumberState(key: string): number | null {
-  const value = getIndexerState(key);
-  if (!value) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 function getStringState(key: string): string | null {
   return getIndexerState(key);
@@ -45,9 +38,10 @@ function formatIso(value: string | null): string {
 }
 
 export default function NetworkStatusPage() {
-  const seenHeight = getNumberState("highest_seen_height");
-  const ingestedHeight = getNumberState("highest_ingested_height");
-  const contiguousHeight = getNumberState("contiguous_processed_height");
+  const health = getIndexerHealth();
+  const seenHeight = health.targetHeight;
+  const ingestedHeight = health.ingestedHeight;
+  const contiguousHeight = health.processedHeight;
   const wsConnected = getStringState("ws_connected") === "true";
   const activeRpc = getStringState("active_rpc");
   const priceState = getPriceState();
@@ -59,10 +53,10 @@ export default function NetworkStatusPage() {
   const coverage = rangeEnd > 0 ? getIndexedHeightCoverage(rangeStart, rangeEnd) : [];
   const indexedCount = coverage.filter((row) => row.status === "indexed").length;
   const emptyCount = coverage.filter((row) => row.status === "empty").length;
-  const failedCount = coverage.filter((row) => row.status === "failed").length;
+  const failedCount = health.failedHeights;
   const coveredCount = indexedCount + emptyCount;
   const expectedCount = rangeEnd > 0 ? rangeEnd - rangeStart + 1 : 0;
-  const missingCount = Math.max(0, expectedCount - coverage.length);
+  const missingCount = health.missingHeights;
   const coveragePercent = expectedCount === 0 ? 0 : (coveredCount / expectedCount) * 100;
   const lagBlocks = seenHeight != null && contiguousHeight != null
     ? Math.max(0, seenHeight - contiguousHeight)

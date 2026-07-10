@@ -15,10 +15,7 @@ import {
   getGlobalRelayCoverage,
   getGlobalComputeUnitCoverage,
   getLatestIndexedFact,
-  getDayCoverage,
-  getWorkloadCoverage,
-  getRewardCoverage,
-  getMaxDayHeights,
+  getDailyHeightCoverage,
   getEmptyHeightsWithoutMetadata,
   updateHeightMetadata,
   markIndexedHeightFailed,
@@ -26,6 +23,7 @@ import {
   pruneIndexedHeightCoverage,
   releaseIndexerLock,
   saveIndexedBlock,
+  migrateV3ToV4,
   saveIndexedServices,
   saveIndexedSupplierDomains,
   setDashboardCache,
@@ -815,73 +813,34 @@ function buildCalendarDailyHistory(
 ): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string; workloadCompleteness: "complete" | "partial" | "missing"; rewardCompleteness: "complete" | "partial" | "missing" }> {
   const now = new Date();
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).getTime();
-  const dayCoverage = getDayCoverageMap();
-
   const rowByDay = new Map(rows.map((r) => [r.day, r]));
 
   const result: ReturnType<typeof buildCalendarDailyHistory> = [];
   for (let d = 0; d < 30; d += 1) {
     const day = new Date(today - (30 - d) * 86400000).toISOString().slice(0, 10);
     const row = rowByDay.get(day);
-    const cov = dayCoverage.get(day);
+    const dayStartMs = today - (30 - d) * 86400000;
+    const cov = getDailyHeightCoverage(dayStartMs, dayStartMs + 86400000);
+    const statusFor = (covered: number): "complete" | "partial" | "missing" => {
+      if (!cov || cov.expectedHeights === 0) return "missing";
+      if (covered === cov.expectedHeights) return "complete";
+      return covered > 0 ? "partial" : "missing";
+    };
     if (!row) {
-      const wc: "complete" | "partial" | "missing" = cov && cov.workloadCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "missing";
-      const rc: "complete" | "partial" | "missing" = cov && cov.rewardCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "missing";
+      const wc = statusFor(cov?.workloadCovered ?? 0);
+      const rc = statusFor(cov?.rewardCovered ?? 0);
       result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", workloadCompleteness: wc, rewardCompleteness: rc });
       continue;
     }
 
-    const wc: "complete" | "partial" | "missing" = cov && cov.workloadCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "partial";
-    const rc: "complete" | "partial" | "missing" = cov && cov.rewardCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "partial";
+    const wc = statusFor(cov?.workloadCovered ?? 0);
+    const rc = statusFor(cov?.rewardCovered ?? 0);
 
     const serialized = serializeDailyCache([row], migrationComplete)[0];
     result.push({ ...serialized, workloadCompleteness: wc, rewardCompleteness: rc });
   }
 
   return result;
-}
-
-function getDayCoverageMap(): Map<string, { coverage: number; totalHeights: number; workloadCoverage: number; rewardCoverage: number }> {
-  try {
-    const blocksPerDay = Math.max(1, getMaxDayHeights());
-    const rows = getDayCoverage(blocksPerDay);
-    const wlArr = getWorkloadCoverage();
-    const rwArr = getRewardCoverage();
-    const wlMap = new Map(wlArr.map(r => [r.day, r.ratio]));
-    const rwMap = new Map(rwArr.map(r => [r.day, r.ratio]));
-    const map = new Map<string, { coverage: number; totalHeights: number; workloadCoverage: number; rewardCoverage: number }>();
-    for (const r of rows) {
-      if (r.day) {
-        map.set(r.day, {
-          coverage: Math.min(1, r.coverage),
-          totalHeights: r.total,
-          workloadCoverage: Math.min(1, wlMap.get(r.day) ?? 0),
-          rewardCoverage: Math.min(1, rwMap.get(r.day) ?? 0),
-        });
-      }
-    }
-    return map;
-  } catch {
-    return new Map();
-  }
-}
-
-function buildWorkloadCoverageMap(): Map<string, number> {
-  try {
-    const rows = getWorkloadCoverage();
-    const map = new Map<string, number>();
-    for (const r of rows) if (r.day) map.set(r.day, r.ratio);
-    return map;
-  } catch { return new Map(); }
-}
-
-function buildRewardCoverageMap(): Map<string, number> {
-  try {
-    const rows = getRewardCoverage();
-    const map = new Map<string, number>();
-    for (const r of rows) if (r.day) map.set(r.day, r.ratio);
-    return map;
-  } catch { return new Map(); }
 }
 
 function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>, migrationComplete: boolean): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
@@ -1074,7 +1033,11 @@ async function processHeight(height: number, rpcUrls = RPC_URLS): Promise<boolea
   try {
     const facts = await fetchBlockFactsWithRetries(height, rpcUrls);
     const blockTime = facts.length > 0 ? facts[0].blockTime : (await fetchBlockTimeMs(height, rpcUrls));
-    saveIndexedBlock(height, facts, blockTime ?? undefined);
+    const timestamp = Number(blockTime);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) {
+      throw new Error(`Block ${height} returned results but no block timestamp`);
+    }
+    saveIndexedBlock(height, facts, timestamp, "rpc");
     if (facts.length > 0) cacheDirty = true;
     return true;
   } catch (error) {
@@ -1104,11 +1067,12 @@ async function fetchHeightResult(height: number, rpcUrls = BACKFILL_RPC_URLS): P
   }
 }
 
-function getRepairCandidateHeights(fromHeight: number, toHeight: number, limit: number): { missing: number[]; failed: number[] } {
+function getRepairCandidateHeights(fromHeight: number, toHeight: number, limit: number): { missing: number[]; failed: number[]; partial: number[] } {
   const coverage = getIndexedHeightCoverage(fromHeight, toHeight);
   const byHeight = new Map(coverage.map((row) => [row.height, row]));
   const missing: number[] = [];
   const failed: number[] = [];
+  const partial: number[] = [];
   const now = Date.now();
 
   for (let height = toHeight; height >= fromHeight && missing.length + failed.length < limit; height -= 1) {
@@ -1117,7 +1081,9 @@ function getRepairCandidateHeights(fromHeight: number, toHeight: number, limit: 
       missing.push(height);
       continue;
     }
-    if (row.status === "failed") {
+    if (row.status === "partial" || row.reward_complete === 0) {
+      partial.push(height);
+    } else if (row.status === "failed") {
       const lastTriedAt = new Date(row.scanned_at).getTime();
       const cooldownElapsed = !Number.isFinite(lastTriedAt) || now - lastTriedAt >= REPAIR_FAILED_COOLDOWN_MS;
       if (row.failure_count < REPAIR_MAX_FAILED_RETRIES && cooldownElapsed) {
@@ -1126,7 +1092,7 @@ function getRepairCandidateHeights(fromHeight: number, toHeight: number, limit: 
     }
   }
 
-  return { missing, failed };
+  return { missing, failed, partial };
 }
 
 async function processRepairHeights(heights: number[], concurrency: number, source: string): Promise<{ repaired: number; failed: number; events: number }> {
@@ -1162,15 +1128,15 @@ async function processRepairHeights(heights: number[], concurrency: number, sour
 
 async function runRepairLoop(): Promise<void> {
   let graphQLCycleCounter = 0;
-  const GRAPHQL_REPAIR_INTERVAL = 6; // use GraphQL every Nth repair cycle
+  const GRAPHQL_REPAIR_INTERVAL = 1;
   while (true) {
     const startedAt = Date.now();
     graphQLCycleCounter += 1;
     try {
       const latestHeight = await getLatestHeight();
       const retentionStartHeight = estimateBackfillStart(latestHeight, RETENTION_DAYS);
-      const { missing, failed } = getRepairCandidateHeights(retentionStartHeight, latestHeight, REPAIR_BATCH_SIZE);
-      const candidateHeights = [...missing, ...failed].sort((a, b) => b - a).slice(0, REPAIR_BATCH_SIZE);
+      const { missing, failed, partial } = getRepairCandidateHeights(retentionStartHeight, latestHeight, REPAIR_BATCH_SIZE);
+      const candidateHeights = [...new Set([...partial, ...missing, ...failed])].sort((a, b) => b - a).slice(0, REPAIR_BATCH_SIZE);
 
       if (candidateHeights.length > 0) {
         const result = await processRepairHeights(candidateHeights, REPAIR_CONCURRENCY, "repair-loop");
@@ -1181,6 +1147,7 @@ async function runRepairLoop(): Promise<void> {
           latestHeight,
           retentionStartHeight,
           missingHeights: missing.length,
+          partialRewardHeights: partial.length,
           retryableFailedHeights: failed.length,
           repairedHeights: result.repaired,
           stillFailedHeights: result.failed,
@@ -1203,8 +1170,9 @@ async function runRepairLoop(): Promise<void> {
         const gqlResult = await graphQLRepairFailedHeights();
         if (gqlResult.repaired > 0 || gqlResult.failed > 0 || gqlResult.metadataRepaired > 0) {
           logInfo("GraphQL repair summary", gqlResult);
-          if (gqlResult.repaired > 0) {
-            await maybeRebuildCaches();
+          if (gqlResult.repaired > 0 || gqlResult.metadataRepaired > 0) {
+            cacheDirty = true;
+            await maybeRebuildCaches(true);
           }
         }
       } catch (error) {
@@ -1342,6 +1310,16 @@ async function runDataMigration(): Promise<void> {
   const storedVersion = Number(getIndexerState("data_version") ?? "0");
   if (storedVersion >= INDEXER_DATA_VERSION) return;
 
+  if (storedVersion === 3) {
+    // v4 is an additive data-model migration. It must finish moving GraphQL
+    // observations out of canonical facts before the version can advance.
+    const result = migrateV3ToV4();
+    setIndexerState("data_version", String(INDEXER_DATA_VERSION));
+    await rebuildIndexerCaches();
+    logInfo("Data migration complete", { fromVersion: storedVersion, version: INDEXER_DATA_VERSION, ...result });
+    return;
+  }
+
   const contiguousVal = getIndexerState("contiguous_processed_height");
   const legacyVal = getIndexerState("last_processed_height");
   const latestHeight = Number(contiguousVal ?? legacyVal ?? 0);
@@ -1418,6 +1396,9 @@ async function runDataMigration(): Promise<void> {
     setIndexerState("highest_ingested_height", legacyVal);
   }
 
+  // Older migrations first reconstitute canonical RPC facts, then apply the
+  // same v4 staging/complete-flag transition before publishing the version.
+  migrateV3ToV4();
   setIndexerState("data_version", String(INDEXER_DATA_VERSION));
   await rebuildIndexerCaches();
   logInfo("Data migration complete", { version: INDEXER_DATA_VERSION, reprocessedHeights: indexedHeights.length });
