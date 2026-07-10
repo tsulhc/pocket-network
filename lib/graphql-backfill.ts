@@ -5,9 +5,11 @@ import {
   getEmptyNullTimestampHeights,
   getEmptyNullTimestampHeightsInRange,
   getFirstHeightAtOrAfter,
+  getBlockHeaderHeight,
   getIndexerState,
   insertGraphQLSettlementFacts,
   setIndexerState,
+  saveBlockHeader,
   updateHeightTimestamp,
   completeVerifiedEmptyHeight,
 } from "@/lib/db";
@@ -128,8 +130,9 @@ export async function graphQLRepairFailedHeights(): Promise<{ repaired: number; 
 
   // Run metadata repair (block headers for empty heights) — target >=1000 per cycle
   const metadataRepaired = await repairEmptyBlockMetadata();
+  const boundariesRepaired = await repairRecentUtcBoundaries();
 
-  return { repaired, failed, events, metadataRepaired };
+  return { repaired, failed, events, metadataRepaired: metadataRepaired + boundariesRepaired };
 }
 
 export async function repairEmptyBlockMetadata(): Promise<number> {
@@ -183,6 +186,43 @@ export async function repairEmptyBlockMetadata(): Promise<number> {
     cursor = Math.min(...historical) - 1;
     setIndexerState("graphql_metadata_repair_cursor", String(Math.max(0, cursor)));
     if (historical.length < 500) break;
+  }
+
+  return total;
+}
+
+export async function repairRecentUtcBoundaries(): Promise<number> {
+  const healthy = await isGraphQLHealthy();
+  if (!healthy) return 0;
+
+  let total = 0;
+  const now = Date.now();
+  const today = new Date(Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate())).getTime();
+
+  for (let d = 0; d < 31; d++) {
+    const dayStartMs = today - d * 86400000;
+    const nextDayStartMs = dayStartMs + 86400000;
+
+    const startH = getFirstHeightAtOrAfter(dayStartMs);
+    const nextH = getFirstHeightAtOrAfter(nextDayStartMs);
+    if (startH == null || nextH == null || nextH <= startH) continue;
+
+    const prev = getBlockHeaderHeight(startH - 1);
+    const beforeNext = getBlockHeaderHeight(nextH - 1);
+    if (prev && prev.block_time < dayStartMs && beforeNext && beforeNext.block_time < nextDayStartMs) continue;
+
+    const targetHeights: number[] = [];
+    if (!prev) targetHeights.push(startH - 1);
+    if (!beforeNext) targetHeights.push(nextH - 1);
+
+    if (targetHeights.length === 0) continue;
+
+    const headers = await fetchBlockHeadersByRange(Math.min(...targetHeights), Math.max(...targetHeights));
+    for (const [height, blockTime] of headers) {
+      if (!targetHeights.includes(height)) continue;
+      saveBlockHeader(height, blockTime, "graphql");
+      total += 1;
+    }
   }
 
   return total;

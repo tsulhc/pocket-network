@@ -97,11 +97,9 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
   const totalCULoad = workloadCompleteOnly.reduce((sum, point) => sum + point.cuLoad, 0);
   const totalWorkloadDays = workloadCompleteOnly.length;
   const linePaths = buildNetworkTrendPaths(trendPoints, maxRevenue);
-  const hasData = trendPoints.some((point) => {
-    if (point.rewardCompleteness === "complete" && point.revenue > 0) return true;
-    if (point.workloadCompleteness === "complete" && point.cuLoad > 0) return true;
-    return false;
-  });
+  const hasHistory = trendPoints.length > 0;
+  const completeRewardDays = rewardCompleteOnly.length;
+  const completeWorkloadDays = workloadCompleteOnly.length;
 
   return (
     <section className="panel section network-trend-panel themed section-theme-demand" style={{ position: 'relative' }}>
@@ -114,7 +112,13 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
         <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last 30 Completed UTC Days</span>
       </div>
 
-      {hasData ? (
+      {completeRewardDays < 30 || completeWorkloadDays < 30 ? (
+        <p className="footer-note">
+          Historical repair in progress. {completeRewardDays}/30 reward days and {completeWorkloadDays}/30 workload days are fully verified.
+        </p>
+      ) : null}
+
+      {hasHistory ? (
         <>
           <div className="network-trend-metrics">
             <div className="panel-inset">
@@ -182,9 +186,9 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
             </span>
           </p>
         </>
-      ) : (
+      ) : trendPoints.length === 0 ? (
         <p className="footer-note">Network history is currently unavailable.</p>
-      )}
+      ) : null}
     </section>
   );
 }

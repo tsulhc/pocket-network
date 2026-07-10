@@ -351,6 +351,16 @@ if (isReadOnly) {
 
   CREATE INDEX IF NOT EXISTS graphql_settlement_facts_height_idx ON graphql_settlement_facts(height);
 
+  CREATE TABLE IF NOT EXISTS block_headers (
+    height INTEGER PRIMARY KEY,
+    block_time INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS block_headers_time_idx ON block_headers(block_time);
+
   CREATE INDEX IF NOT EXISTS settlement_facts_time_idx ON settlement_facts(block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_service_time_idx ON settlement_facts(service_id, block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_day_idx ON settlement_facts(day);
@@ -594,6 +604,18 @@ const countEmptyNullTimestampStatement = db.prepare(
 
 const selectEmptyHeightsWithoutMetadataStatement = db.prepare(
   "SELECT ih.height, sb.block_time FROM indexed_heights ih JOIN settlement_blocks sb ON sb.height = ih.height WHERE ih.status = 'empty' AND ih.block_time IS NULL ORDER BY ih.height LIMIT ?"
+);
+
+const upsertBlockHeaderStatement = db.prepare(
+  `
+    INSERT INTO block_headers (height, block_time, day, source, fetched_at)
+    VALUES (@height, @block_time, @day, @source, @fetched_at)
+    ON CONFLICT(height) DO UPDATE SET
+      block_time = excluded.block_time,
+      day = excluded.day,
+      source = excluded.source,
+      fetched_at = excluded.fetched_at
+  `
 );
 
 const updateHeightTimestampStatement = db.prepare(
@@ -903,6 +925,7 @@ export function saveIndexedBlock(height: number, facts: IndexedSettlementFact[],
     throw new Error(`Cannot save height ${height} without a block timestamp`);
   }
   const day = new Date(blockTime as number).toISOString().slice(0, 10);
+  saveBlockHeader(height, blockTime as number, source);
   writeIndexedBlockTransaction(height, facts, blockTime as number, day, source);
 }
 
@@ -950,19 +973,23 @@ export type DailyHeightCoverage = {
   missing: number;
 };
 
+export function saveBlockHeader(height: number, blockTime: number, source: string): void {
+  try {
+    const day = new Date(blockTime).toISOString().slice(0, 10);
+    upsertBlockHeaderStatement.run({ height, block_time: blockTime, day, source, fetched_at: new Date().toISOString() });
+  } catch { }
+}
+
 export function getDailyHeightCoverage(dayStartMs: number, nextDayStartMs: number): Omit<DailyHeightCoverage, "day"> | null {
-  const start = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(dayStartMs) as { height: number | null };
-  const next = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(nextDayStartMs) as { height: number | null };
+  const start = db.prepare("SELECT MIN(height) AS height FROM block_headers WHERE block_time >= ?").get(dayStartMs) as { height: number | null };
+  const next = db.prepare("SELECT MIN(height) AS height FROM block_headers WHERE block_time >= ?").get(nextDayStartMs) as { height: number | null };
   if (start.height == null || next.height == null || next.height <= start.height) return null;
 
-  // Verify both boundaries are reliable. The block immediately before start
-  // must have block_time < dayStartMs — otherwise we jumped past the true
-  // first block of the day and are undercounting the expected range.
-  const prev = db.prepare("SELECT block_time FROM indexed_heights WHERE height = ? AND block_time IS NOT NULL").get(start.height - 1) as { block_time: number } | undefined;
+  const prev = db.prepare("SELECT block_time FROM block_headers WHERE height = ?").get(start.height - 1) as { block_time: number } | undefined;
   if (!prev || prev.block_time >= dayStartMs) return null;
 
-  const expNext = db.prepare("SELECT block_time FROM indexed_heights WHERE height = ? AND block_time IS NOT NULL").get(next.height - 1) as { block_time: number } | undefined;
-  if (!expNext || expNext.block_time >= nextDayStartMs) return null;
+  const beforeNext = db.prepare("SELECT block_time FROM block_headers WHERE height = ?").get(next.height - 1) as { block_time: number } | undefined;
+  if (!beforeNext || beforeNext.block_time >= nextDayStartMs) return null;
 
   const expectedHeights = next.height - start.height;
   const row = db.prepare(`
@@ -1047,6 +1074,7 @@ export function savePartialBlock(height: number, blockTime?: number): void {
     throw new Error(`Cannot save partial height ${height} without a block timestamp`);
   }
   const day = blockTime != null ? new Date(blockTime).toISOString().slice(0, 10) : null;
+  saveBlockHeader(height, blockTime as number, "graphql");
   upsertIndexedHeightStatement.run({
     height,
     status: "partial",
@@ -1082,6 +1110,12 @@ export function getEmptyNullTimestampHeightsInRange(
 export function getFirstHeightAtOrAfter(timestampMs: number): number | null {
   const row = db.prepare("SELECT MIN(height) AS height FROM indexed_heights WHERE block_time >= ?").get(timestampMs) as { height: number | null };
   return row.height ?? null;
+}
+
+export function getBlockHeaderHeight(height: number): { block_time: number } | undefined {
+  try {
+    return db.prepare("SELECT block_time FROM block_headers WHERE height = ?").get(height) as { block_time: number } | undefined;
+  } catch { return undefined; }
 }
 
 export function getPartialWorkloadHeights(): number {
