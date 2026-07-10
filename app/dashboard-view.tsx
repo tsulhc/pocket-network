@@ -43,13 +43,13 @@ function compareRevenueDesc<T extends { revenueUpokt: string }>(a: T, b: T): num
   return bRevenue > aRevenue ? 1 : -1;
 }
 
-function buildNetworkTrendPaths(points: Array<{ revenue: number; completeness?: string }>, maxRevenue: number): string[] {
+function buildNetworkTrendPaths(points: Array<{ revenue: number; rewardCompleteness?: string }>, maxRevenue: number): string[] {
   if (points.length === 0 || maxRevenue === 0) return [];
 
   const segments: Array<Array<{ revenue: number }>> = [];
   let current: Array<{ revenue: number }> = [];
   for (const point of points) {
-    if (point.completeness === "missing") {
+    if (point.rewardCompleteness === "partial" || point.rewardCompleteness === "missing") {
       if (current.length > 0) { segments.push(current); current = []; }
     } else {
       current.push(point);
@@ -83,16 +83,24 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
     day: point.day,
     revenue: toPoktNumber(point.revenueUpokt),
     cuLoad: useCU ? point.estimatedComputeUnits! : point.relays,
-    completeness: point.completeness ?? "complete"
+    workloadCompleteness: point.workloadCompleteness ?? "complete",
+    rewardCompleteness: point.rewardCompleteness ?? "complete"
   }));
-  const nonMissing = trendPoints.filter((p) => p.completeness !== "missing");
-  const maxRevenue = Math.max(...nonMissing.map((point) => point.revenue), 0);
+  const rewardCompleteOnly = trendPoints.filter((p) => p.rewardCompleteness === "complete" && p.revenue > 0);
+  const maxRevenue = Math.max(...(rewardCompleteOnly.length > 0 ? rewardCompleteOnly : trendPoints).map((point) => point.revenue), 0);
   const maxCULoad = Math.max(...trendPoints.map((point) => point.cuLoad), 0);
-  const latestPoint = trendPoints.at(-1);
-  const totalRevenue = trendPoints.reduce((sum, point) => sum + point.revenue, 0);
+  const latestRewardPoint = rewardCompleteOnly.length > 0 ? rewardCompleteOnly.at(-1) : trendPoints.at(-1);
+  const latestWorkloadPoint = trendPoints.filter((p) => p.workloadCompleteness === "complete").at(-1) ?? trendPoints.at(-1);
+  const totalRevenue = rewardCompleteOnly.reduce((sum, point) => sum + point.revenue, 0);
+  const totalRewardDays = rewardCompleteOnly.length;
   const totalCULoad = trendPoints.reduce((sum, point) => sum + point.cuLoad, 0);
+  const totalWorkloadDays = trendPoints.filter((p) => p.workloadCompleteness === "complete").length;
   const linePaths = buildNetworkTrendPaths(trendPoints, maxRevenue);
-  const hasData = trendPoints.some((point) => point.revenue > 0 || point.cuLoad > 0);
+  const hasData = trendPoints.some((point) => {
+    if (point.rewardCompleteness === "complete" && point.revenue > 0) return true;
+    if (point.workloadCompleteness === "complete" && point.cuLoad > 0) return true;
+    return false;
+  });
 
   return (
     <section className="panel section network-trend-panel themed section-theme-demand" style={{ position: 'relative' }}>
@@ -102,7 +110,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
           <h2 className="section-title">Network Trend</h2>
           <p className="section-subtitle">Daily rewards and finalized compute unit demand over the last 30 days.</p>
         </div>
-        <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last {trendPoints.length} Days</span>
+        <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last 30 Completed UTC Days</span>
       </div>
 
       {hasData ? (
@@ -110,19 +118,21 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
           <div className="network-trend-metrics">
             <div className="panel-inset">
               <span className="hero-highlight-label">Latest Rewards</span>
-              <strong style={{ color: 'var(--yellow-primary)' }}>{latestPoint ? `${formatDecimal(latestPoint.revenue, 1)} POKT` : "n/a"}</strong>
+              <strong style={{ color: 'var(--yellow-primary)' }}>{latestRewardPoint ? `${formatDecimal(latestRewardPoint.revenue, 1)} POKT` : "n/a"}</strong>
             </div>
             <div className="panel-inset">
               <span className="hero-highlight-label">{useCU ? "Latest CU" : "Latest Relays"}</span>
-              <strong style={{ color: 'var(--green)' }}>{latestPoint ? formatCompactNumber(latestPoint.cuLoad) : "n/a"}</strong>
+              <strong style={{ color: 'var(--green)' }}>{latestWorkloadPoint ? formatCompactNumber(latestWorkloadPoint.cuLoad) : "n/a"}</strong>
             </div>
             <div className="panel-inset">
-              <span className="hero-highlight-label">Window Rewards</span>
+              <span className="hero-highlight-label">{totalRewardDays === 30 ? "Window Rewards" : "Known Rewards"}</span>
               <strong>{formatDecimal(totalRevenue, 1)} POKT</strong>
+              {totalRewardDays < 30 && <span className="muted" style={{ fontSize: '0.75rem' }}>({totalRewardDays}/30 complete)</span>}
             </div>
             <div className="panel-inset">
-              <span className="hero-highlight-label">{useCU ? "Window CU" : "Window Relays"}</span>
+              <span className="hero-highlight-label">{totalWorkloadDays === 30 ? (useCU ? "Window CU" : "Window Relays") : (useCU ? "Known CU" : "Known Relays")}</span>
               <strong>{formatCompactNumber(totalCULoad)}</strong>
+              {totalWorkloadDays < 30 && <span className="muted" style={{ fontSize: '0.75rem' }}>({totalWorkloadDays}/30 complete)</span>}
             </div>
           </div>
 
@@ -137,11 +147,11 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
               {linePaths.map((d, i) => <path key={i} d={d} />)}
             </svg>
             {trendPoints.map((point) => {
-              const isMissing = point.completeness === "missing";
-              const isPartial = point.completeness === "partial";
+              const isMissing = point.workloadCompleteness === "missing";
+              const isPartial = point.workloadCompleteness === "partial";
               const barValue = isMissing ? 0 : point.cuLoad;
               const height = isMissing ? 2 : (maxCULoad === 0 ? 2 : Math.max(4, Math.round((barValue / maxCULoad) * 100)));
-              const isActive = point === latestPoint;
+              const isActive = point === latestWorkloadPoint;
               const loadUnit = useCU ? "CU" : "relays";
 
               return (

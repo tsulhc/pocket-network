@@ -45,15 +45,16 @@ function formatIso(value: string | null): string {
 }
 
 export default function NetworkStatusPage() {
-  const latestSeenHeight = getNumberState("latest_seen_height");
-  const lastProcessedHeight = getNumberState("last_processed_height");
+  const seenHeight = getNumberState("highest_seen_height");
+  const ingestedHeight = getNumberState("highest_ingested_height");
+  const contiguousHeight = getNumberState("contiguous_processed_height");
   const wsConnected = getStringState("ws_connected") === "true";
   const activeRpc = getStringState("active_rpc");
   const priceState = getPriceState();
   const averageBlockSeconds = Number(process.env.POCKET_INDEXER_AVG_BLOCK_SECONDS ?? 60);
   const retentionDays = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
   const estimatedRetentionBlocks = Math.max(1, Math.round((retentionDays * 24 * 60 * 60) / Math.max(averageBlockSeconds, 1)));
-  const rangeEnd = latestSeenHeight ?? lastProcessedHeight ?? 0;
+  const rangeEnd = seenHeight ?? ingestedHeight ?? contiguousHeight ?? 0;
   const rangeStart = Math.max(1, rangeEnd - estimatedRetentionBlocks + 1);
   const coverage = rangeEnd > 0 ? getIndexedHeightCoverage(rangeStart, rangeEnd) : [];
   const indexedCount = coverage.filter((row) => row.status === "indexed").length;
@@ -63,8 +64,8 @@ export default function NetworkStatusPage() {
   const expectedCount = rangeEnd > 0 ? rangeEnd - rangeStart + 1 : 0;
   const missingCount = Math.max(0, expectedCount - coverage.length);
   const coveragePercent = expectedCount === 0 ? 0 : (coveredCount / expectedCount) * 100;
-  const lagBlocks = latestSeenHeight != null && lastProcessedHeight != null
-    ? Math.max(0, latestSeenHeight - lastProcessedHeight)
+  const lagBlocks = seenHeight != null && contiguousHeight != null
+    ? Math.max(0, seenHeight - contiguousHeight)
     : null;
   const newestScan = coverage.reduce<string | null>((latest, row) => {
     if (!latest) return row.scanned_at;
@@ -106,13 +107,18 @@ export default function NetworkStatusPage() {
       <section className="kpi-grid kpi-grid-strong rewards-kpi-grid">
         <article className="panel kpi kpi-primary">
           <span className="kpi-label">Latest Seen Height</span>
-          <span className="kpi-value">{latestSeenHeight == null ? "n/a" : formatInteger(latestSeenHeight)}</span>
+          <span className="kpi-value">{seenHeight == null ? "n/a" : formatInteger(seenHeight)}</span>
           <span className="kpi-foot">Highest chain height observed by the indexer</span>
         </article>
         <article className="panel kpi">
-          <span className="kpi-label">Processed Height</span>
-          <span className="kpi-value">{lastProcessedHeight == null ? "n/a" : formatInteger(lastProcessedHeight)}</span>
-          <span className="kpi-foot">Highest saved checkpoint</span>
+          <span className="kpi-label">Highest Ingested Height</span>
+          <span className="kpi-value">{ingestedHeight == null ? "n/a" : formatInteger(ingestedHeight)}</span>
+          <span className="kpi-foot">Highest height successfully processed</span>
+        </article>
+        <article className="panel kpi">
+          <span className="kpi-label">Contiguous Height</span>
+          <span className="kpi-value">{contiguousHeight == null ? "n/a" : formatInteger(contiguousHeight)}</span>
+          <span className="kpi-foot">Last verified contiguous checkpoint</span>
         </article>
         <article className="panel kpi">
           <span className="kpi-label">Covered Heights</span>
@@ -174,8 +180,8 @@ export default function NetworkStatusPage() {
           <div className="insight-row"><span className="muted">Active RPC</span><strong className="mono">{activeRpc ?? "n/a"}</strong></div>
           <div className="insight-row"><span className="muted">POKT price</span><strong>{priceState.value == null ? "n/a" : `$${priceState.value.toFixed(4)}`}</strong></div>
           <div className="insight-row"><span className="muted">Price updated</span><strong>{formatIso(priceState.updatedAt)}</strong></div>
-          <div className="insight-row"><span className="muted">Indexer height</span><strong>{lastProcessedHeight == null ? "n/a" : formatInteger(lastProcessedHeight)}</strong></div>
-          <div className="insight-row"><span className="muted">Chain height</span><strong>{latestSeenHeight == null ? "n/a" : formatInteger(latestSeenHeight)}</strong></div>
+          <div className="insight-row"><span className="muted">Contiguous height</span><strong>{contiguousHeight == null ? "n/a" : formatInteger(contiguousHeight)}</strong></div>
+          <div className="insight-row"><span className="muted">Chain height</span><strong>{seenHeight == null ? "n/a" : formatInteger(seenHeight)}</strong></div>
         </div>
       </section>
     </main>

@@ -176,6 +176,35 @@ export async function fetchSettlementsByBlockRange(
   return { settlements: results, blocksFound, blockTimeByHeight };
 }
 
+export async function fetchBlockHeadersByRange(fromHeight: number, toHeight: number): Promise<Map<number, number>> {
+  const result = new Map<number, number>();
+  let from = fromHeight;
+
+  while (from <= toHeight) {
+    const batchTo = Math.min(from + 500, toHeight);
+    const query = `query($from: BigInt!, $to: BigInt!) {
+      blocks(
+        filter: { height: { greaterThanOrEqualTo: $from, lessThanOrEqualTo: $to } }
+        orderBy: HEIGHT_ASC
+        first: 500
+      ) {
+        nodes { height header }
+      }
+    }`;
+    const data = await fetchGraphQL<{ blocks: { nodes: Array<{ height: string; header: { time: string } }> } }>(query, {
+      from: String(from), to: String(batchTo),
+    });
+    for (const n of data.blocks.nodes) {
+      const h = Number(n.height);
+      const bt = Date.parse(n.header?.time ?? "");
+      if (Number.isFinite(bt) && bt > 0) result.set(h, bt);
+    }
+    from = batchTo + 1;
+  }
+
+  return result;
+}
+
 export async function updateGraphQLWatermark(): Promise<void> {
   try {
     const meta = await fetchGraphQLMetadata();

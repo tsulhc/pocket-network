@@ -143,12 +143,16 @@ export type IndexerHealth = {
   dataVersion: string | null;
   processedHeight: number | null;
   targetHeight: number | null;
+  ingestedHeight: number | null;
   lastSuccessfulCommit: string | null;
   lastBackup: string | null;
   isLocked: boolean;
   gaps: number;
   failedHeights: number;
+  missingHeights: number;
   emptyNullTimestamps: number;
+  partialWorkloadHeights: number;
+  partialRewardHeights: number;
 };
 
 export function getIndexerHealth(): IndexerHealth {
@@ -166,25 +170,42 @@ export function getIndexerHealth(): IndexerHealth {
     const dataVersion = getIndexerState("data_version");
     const processedHeight = getIndexerState("contiguous_processed_height");
     const targetHeight = getIndexerState("highest_seen_height");
+    const ingestedHeightStr = getIndexerState("highest_ingested_height");
     let gaps = 0;
     let failedHeights = 0;
     let emptyNullTimestamps = 0;
+    let partialWorkloadHeights = 0;
+    let partialRewardHeights = 0;
+    let missingHeights = 0;
+    const retention = 45 * 24 * 60; // 45 days in minutes (blocks)
+    const processedH = processedHeight ? Number.parseInt(processedHeight, 10) || 0 : 0;
+    const retentionStartH = Math.max(1, processedH - retention);
     try {
       const gapRow = selectGapCountStatement.get() as { gaps: number; failed: number } | undefined;
       if (gapRow) { gaps = gapRow.gaps; failedHeights = gapRow.failed; }
       emptyNullTimestamps = getEmptyNullTimestampCount();
-    } catch { /* queries may not be available on older schema */ }
+      partialWorkloadHeights = getPartialWorkloadHeights();
+      partialRewardHeights = getPartialRewardHeights();
+      const seenH = targetHeight ? Number.parseInt(targetHeight, 10) || 0 : 0;
+      if (processedH > 0 && seenH > 0) {
+        missingHeights = getMissingHeightCount(retentionStartH, seenH);
+      }
+    } catch { }
     return {
       schemaVersion: getMeta("schema_version") ?? null,
       dataVersion: dataVersion ?? null,
       processedHeight: processedHeight ? Number.parseInt(processedHeight, 10) || null : null,
       targetHeight: targetHeight ? Number.parseInt(targetHeight, 10) || null : null,
+      ingestedHeight: ingestedHeightStr ? Number.parseInt(ingestedHeightStr, 10) || null : null,
       lastSuccessfulCommit: getIndexerState("last_successful_commit") ?? null,
       lastBackup: getIndexerState("last_backup") ?? null,
       isLocked,
       gaps,
       failedHeights,
+      missingHeights,
       emptyNullTimestamps,
+      partialWorkloadHeights,
+      partialRewardHeights,
     };
   } catch {
     return {
@@ -192,12 +213,16 @@ export function getIndexerHealth(): IndexerHealth {
       dataVersion: null,
       processedHeight: null,
       targetHeight: null,
+      ingestedHeight: null,
       lastSuccessfulCommit: null,
       lastBackup: null,
       isLocked,
       gaps: 0,
       failedHeights: 0,
+      missingHeights: 0,
       emptyNullTimestamps: 0,
+      partialWorkloadHeights: 0,
+      partialRewardHeights: 0,
     };
   }
 }
@@ -303,6 +328,24 @@ if (isReadOnly) {
     generated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS graphql_settlement_facts (
+    source_record_id TEXT PRIMARY KEY,
+    height INTEGER NOT NULL,
+    block_time INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    supplier_hash TEXT NOT NULL,
+    owner_hash TEXT,
+    relays INTEGER,
+    estimated_relays INTEGER,
+    estimated_compute_units INTEGER,
+    claimed_amount TEXT,
+    settled_amount TEXT,
+    fetched_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS graphql_settlement_facts_height_idx ON graphql_settlement_facts(height);
+
   CREATE INDEX IF NOT EXISTS settlement_facts_time_idx ON settlement_facts(block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_service_time_idx ON settlement_facts(service_id, block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_day_idx ON settlement_facts(day);
@@ -325,6 +368,9 @@ if (isReadOnly) {
     "ALTER TABLE indexed_heights ADD COLUMN block_time INTEGER",
     "ALTER TABLE indexed_heights ADD COLUMN day TEXT",
     "ALTER TABLE indexed_heights ADD COLUMN source TEXT NOT NULL DEFAULT 'rpc'",
+    "ALTER TABLE indexed_heights ADD COLUMN block_complete INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE indexed_heights ADD COLUMN workload_complete INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE indexed_heights ADD COLUMN reward_complete INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE settlement_facts ADD COLUMN ingestion_source TEXT NOT NULL DEFAULT 'rpc'",
     "ALTER TABLE settlement_facts ADD COLUMN source_record_id TEXT",
   ]) {
@@ -520,6 +566,13 @@ const selectFailedHeightsStatement = db.prepare(
   "SELECT height FROM indexed_heights WHERE status = 'failed' ORDER BY failure_count ASC, height DESC LIMIT ?"
 );
 
+const insertGraphQLSettlementFactStatement = db.prepare(
+  `
+    INSERT OR IGNORE INTO graphql_settlement_facts (source_record_id, height, block_time, day, service_id, supplier_hash, owner_hash, relays, estimated_relays, estimated_compute_units, claimed_amount, settled_amount, fetched_at)
+    VALUES (@source_record_id, @height, @block_time, @day, @service_id, @supplier_hash, @owner_hash, @relays, @estimated_relays, @estimated_compute_units, @claimed_amount, @settled_amount, @fetched_at)
+  `
+);
+
 const selectEmptyNullTimestampStatement = db.prepare(
   "SELECT height FROM indexed_heights WHERE status = 'empty' AND block_time IS NULL ORDER BY height ASC LIMIT ?"
 );
@@ -536,6 +589,28 @@ const selectDayCoverageStatement = db.prepare(
       CAST(COUNT(*) AS INTEGER) AS total
     FROM indexed_heights
     WHERE day IS NOT NULL AND status IN ('indexed', 'empty')
+    GROUP BY day
+  `
+);
+
+const selectWorkloadCoverageStatement = db.prepare(
+  `
+    SELECT
+      day,
+      CAST(SUM(workload_complete) * 1.0 / NULLIF(COUNT(*), 0) AS REAL) AS ratio
+    FROM indexed_heights
+    WHERE day IS NOT NULL
+    GROUP BY day
+  `
+);
+
+const selectRewardCoverageStatement = db.prepare(
+  `
+    SELECT
+      day,
+      CAST(SUM(reward_complete) * 1.0 / NULLIF(COUNT(*), 0) AS REAL) AS ratio
+    FROM indexed_heights
+    WHERE day IS NOT NULL
     GROUP BY day
   `
 );
@@ -875,6 +950,18 @@ export function getDayCoverage(blocksPerDay: number): Array<{ day: string; cover
   }
 }
 
+export function getWorkloadCoverage(): Array<{ day: string; ratio: number }> {
+  try {
+    return selectWorkloadCoverageStatement.all() as Array<{ day: string; ratio: number }>;
+  } catch { return []; }
+}
+
+export function getRewardCoverage(): Array<{ day: string; ratio: number }> {
+  try {
+    return selectRewardCoverageStatement.all() as Array<{ day: string; ratio: number }>;
+  } catch { return []; }
+}
+
 export function getMaxDayHeights(): number {
   try {
     const row = selectMaxDayHeightsStatement.get() as { max_count: number } | undefined;
@@ -901,6 +988,99 @@ export function getEmptyNullTimestampCount(): number {
     return 0;
   }
 }
+export function insertGraphQLSettlementFacts(
+  facts: Array<{
+    sourceRecordId: string;
+    height: number;
+    blockTime: number;
+    day: string;
+    serviceId: string;
+    supplierHash: string;
+    ownerHash: string | null;
+    relays: number;
+    estimatedRelays?: number;
+    estimatedComputeUnits?: number;
+    claimedAmount: string;
+    settledAmount: string;
+  }>
+): void {
+  const now = new Date().toISOString();
+  for (const f of facts) {
+    insertGraphQLSettlementFactStatement.run({
+      source_record_id: f.sourceRecordId,
+      height: f.height,
+      block_time: f.blockTime,
+      day: f.day,
+      service_id: f.serviceId,
+      supplier_hash: f.supplierHash,
+      owner_hash: f.ownerHash,
+      relays: f.relays,
+      estimated_relays: f.estimatedRelays ?? null,
+      estimated_compute_units: f.estimatedComputeUnits ?? null,
+      claimed_amount: f.claimedAmount,
+      settled_amount: f.settledAmount,
+      fetched_at: now,
+    });
+  }
+}
+
+export function deleteGraphQLSettlementFactsForHeight(height: number): void {
+  try { db.prepare("DELETE FROM graphql_settlement_facts WHERE height = ?").run(height); } catch { }
+}
+
+export function savePartialBlock(height: number, blockTime?: number): void {
+  const day = blockTime != null ? new Date(blockTime).toISOString().slice(0, 10) : null;
+  upsertIndexedHeightStatement.run({
+    height,
+    status: "indexed",
+    scanned_at: new Date().toISOString(),
+    event_count: 0,
+    failure_count: 0,
+    last_error: null,
+    block_time: blockTime ?? null,
+    day: day ?? null,
+    source: "graphql",
+  });
+  setIndexerState("highest_ingested_height", String(height));
+  // Also mark completeness: block+workload=1, reward=0 (GraphQL settlements are staging only)
+  try { db.prepare("UPDATE indexed_heights SET block_complete=1, workload_complete=1, reward_complete=0 WHERE height=?").run(height); } catch {}
+}
+
+export function getEmptyNullTimestampHeightsInRange(
+  fromHeight: number,
+  toHeight: number,
+  limit: number,
+  newestFirst: boolean
+): number[] {
+  try {
+    const order = newestFirst ? "DESC" : "ASC";
+    const sql = `SELECT height FROM indexed_heights WHERE status='empty' AND block_time IS NULL AND height >= ? AND height <= ? ORDER BY height ${order} LIMIT ?`;
+    const rows = db.prepare(sql).all(fromHeight, toHeight, limit) as Array<{ height: number }>;
+    return rows.map(r => r.height);
+  } catch { return []; }
+}
+
+export function getPartialWorkloadHeights(): number {
+  try {
+    const row = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE workload_complete=0 AND status IN ('empty','indexed')").get() as { c: number };
+    return row?.c ?? 0;
+  } catch { return 0; }
+}
+
+export function getPartialRewardHeights(): number {
+  try {
+    const row = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE reward_complete=0 AND status IN ('empty','indexed')").get() as { c: number };
+    return row?.c ?? 0;
+  } catch { return 0; }
+}
+
+export function getMissingHeightCount(_retentionStartHeight: number, retentionEndHeight: number): number {
+  try {
+    const present = db.prepare("SELECT COUNT(*) AS c FROM indexed_heights WHERE height BETWEEN ? AND ?").get(_retentionStartHeight, retentionEndHeight) as { c: number };
+    return Math.max(0, (retentionEndHeight - _retentionStartHeight + 1) - (present?.c ?? 0));
+  } catch { return 0; }
+}
+
 export function getFailedHeights(limit = 100): number[] {
   try {
     const rows = selectFailedHeightsStatement.all(limit) as Array<{ height: number }>;

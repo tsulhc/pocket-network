@@ -16,6 +16,8 @@ import {
   getGlobalComputeUnitCoverage,
   getLatestIndexedFact,
   getDayCoverage,
+  getWorkloadCoverage,
+  getRewardCoverage,
   getMaxDayHeights,
   getEmptyHeightsWithoutMetadata,
   updateHeightMetadata,
@@ -220,7 +222,7 @@ let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
-const INDEXER_DATA_VERSION = 3;
+const INDEXER_DATA_VERSION = 4;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
@@ -810,7 +812,7 @@ async function refreshPrice(): Promise<number> {
 function buildCalendarDailyHistory(
   rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>,
   migrationComplete: boolean
-): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string; completeness: "complete" | "partial" | "missing" }> {
+): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string; workloadCompleteness: "complete" | "partial" | "missing"; rewardCompleteness: "complete" | "partial" | "missing" }> {
   const now = new Date();
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).getTime();
   const dayCoverage = getDayCoverageMap();
@@ -819,38 +821,67 @@ function buildCalendarDailyHistory(
 
   const result: ReturnType<typeof buildCalendarDailyHistory> = [];
   for (let d = 0; d < 30; d += 1) {
-    // Last 30 completed UTC days: yesterday - 29 through yesterday
     const day = new Date(today - (30 - d) * 86400000).toISOString().slice(0, 10);
     const row = rowByDay.get(day);
     const cov = dayCoverage.get(day);
     if (!row) {
-      const completeness: "complete" | "partial" | "missing" = cov && cov.coverage >= 1 && cov.totalHeights > 0 ? "complete" : "missing";
-      result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", completeness });
+      const wc: "complete" | "partial" | "missing" = cov && cov.workloadCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "missing";
+      const rc: "complete" | "partial" | "missing" = cov && cov.rewardCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "missing";
+      result.push({ day, relays: 0, estimatedRelays: undefined, estimatedComputeUnits: undefined, isEstimated: undefined, relayCoverage: undefined, revenueUpokt: "0", workloadCompleteness: wc, rewardCompleteness: rc });
       continue;
     }
 
-    const completeness: "complete" | "partial" | "missing" =
-      cov && cov.coverage >= 1 && cov.totalHeights > 0 ? "complete" : "partial";
+    const wc: "complete" | "partial" | "missing" = cov && cov.workloadCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "partial";
+    const rc: "complete" | "partial" | "missing" = cov && cov.rewardCoverage >= 1 && cov.totalHeights > 0 ? "complete" : "partial";
 
     const serialized = serializeDailyCache([row], migrationComplete)[0];
-    result.push({ ...serialized, completeness });
+    result.push({ ...serialized, workloadCompleteness: wc, rewardCompleteness: rc });
   }
 
   return result;
 }
 
-function getDayCoverageMap(): Map<string, { coverage: number; totalHeights: number }> {
+function getDayCoverageMap(): Map<string, { coverage: number; totalHeights: number; workloadCoverage: number; rewardCoverage: number }> {
   try {
     const blocksPerDay = Math.max(1, getMaxDayHeights());
     const rows = getDayCoverage(blocksPerDay);
-    const map = new Map<string, { coverage: number; totalHeights: number }>();
+    const wlArr = getWorkloadCoverage();
+    const rwArr = getRewardCoverage();
+    const wlMap = new Map(wlArr.map(r => [r.day, r.ratio]));
+    const rwMap = new Map(rwArr.map(r => [r.day, r.ratio]));
+    const map = new Map<string, { coverage: number; totalHeights: number; workloadCoverage: number; rewardCoverage: number }>();
     for (const r of rows) {
-      if (r.day) map.set(r.day, { coverage: Math.min(1, r.coverage), totalHeights: r.total });
+      if (r.day) {
+        map.set(r.day, {
+          coverage: Math.min(1, r.coverage),
+          totalHeights: r.total,
+          workloadCoverage: Math.min(1, wlMap.get(r.day) ?? 0),
+          rewardCoverage: Math.min(1, rwMap.get(r.day) ?? 0),
+        });
+      }
     }
     return map;
   } catch {
     return new Map();
   }
+}
+
+function buildWorkloadCoverageMap(): Map<string, number> {
+  try {
+    const rows = getWorkloadCoverage();
+    const map = new Map<string, number>();
+    for (const r of rows) if (r.day) map.set(r.day, r.ratio);
+    return map;
+  } catch { return new Map(); }
+}
+
+function buildRewardCoverageMap(): Map<string, number> {
+  try {
+    const rows = getRewardCoverage();
+    const map = new Map<string, number>();
+    for (const r of rows) if (r.day) map.set(r.day, r.ratio);
+    return map;
+  } catch { return new Map(); }
 }
 
 function serializeDailyCache(rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>, migrationComplete: boolean): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string }> {
@@ -1053,9 +1084,21 @@ async function processHeight(height: number, rpcUrls = RPC_URLS): Promise<boolea
   }
 }
 
-async function fetchHeightResult(height: number, rpcUrls = BACKFILL_RPC_URLS): Promise<{ height: number; facts?: IndexedSettlementFact[]; error?: string }> {
+type HeightFetchResult = {
+  height: number;
+  facts?: IndexedSettlementFact[];
+  blockTime?: number;
+  error?: string;
+};
+
+async function fetchHeightResult(height: number, rpcUrls = BACKFILL_RPC_URLS): Promise<HeightFetchResult> {
   try {
-    return { height, facts: await fetchBlockFactsWithRetries(height, rpcUrls) };
+    const facts = await fetchBlockFactsWithRetries(height, rpcUrls);
+    const blockTime = facts[0]?.blockTime ?? await fetchBlockTimeMs(height, rpcUrls);
+    if (!Number.isFinite(blockTime)) {
+      throw new Error(`Block ${height} returned results but no block timestamp`);
+    }
+    return { height, facts, blockTime };
   } catch (error) {
     return { height, error: formatError(error) };
   }
@@ -1095,7 +1138,7 @@ async function processRepairHeights(heights: number[], concurrency: number, sour
 
   for (const result of results.sort((a, b) => b.height - a.height)) {
     if (result.facts) {
-            saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime ?? undefined);;
+      saveIndexedBlock(result.height, result.facts, result.blockTime, "rpc");
       repaired += 1;
       events += result.facts.length;
       if (result.facts.length > 0) cacheDirty = true;
@@ -1158,7 +1201,7 @@ async function runRepairLoop(): Promise<void> {
       try {
         await updateGraphQLWatermark();
         const gqlResult = await graphQLRepairFailedHeights();
-        if (gqlResult.repaired > 0 || gqlResult.failed > 0) {
+        if (gqlResult.repaired > 0 || gqlResult.failed > 0 || gqlResult.metadataRepaired > 0) {
           logInfo("GraphQL repair summary", gqlResult);
           if (gqlResult.repaired > 0) {
             await maybeRebuildCaches();
@@ -1240,7 +1283,7 @@ async function processBackfillRange(fromHeight: number, toHeight: number, maxBlo
 
     for (const result of batchResults.sort((a, b) => b.height - a.height)) {
       if (result.facts) {
-              saveIndexedBlock(result.height, result.facts, result.facts[0]?.blockTime ?? undefined);;
+        saveIndexedBlock(result.height, result.facts, result.blockTime, "rpc");
         indexedEvents += result.facts.length;
         if (result.facts.length > 0) cacheDirty = true;
       } else {
