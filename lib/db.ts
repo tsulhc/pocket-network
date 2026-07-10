@@ -361,6 +361,41 @@ if (isReadOnly) {
 
   CREATE INDEX IF NOT EXISTS block_headers_time_idx ON block_headers(block_time);
 
+  CREATE TABLE IF NOT EXISTS graphql_import_ranges (
+    phase TEXT NOT NULL,
+    from_height INTEGER NOT NULL,
+    to_height INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    source_watermark INTEGER,
+    header_count INTEGER NOT NULL DEFAULT 0,
+    settlement_count INTEGER NOT NULL DEFAULT 0,
+    page_count INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_cursor TEXT,
+    last_error TEXT,
+    started_at TEXT,
+    committed_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (phase, from_height, to_height)
+  );
+
+  CREATE TABLE IF NOT EXISTS graphql_reconciliation (
+    height INTEGER PRIMARY KEY,
+    graphql_event_count INTEGER,
+    rpc_event_count INTEGER,
+    graphql_relays INTEGER,
+    rpc_relays INTEGER,
+    graphql_compute_units INTEGER,
+    rpc_compute_units INTEGER,
+    status TEXT NOT NULL,
+    details_json TEXT,
+    checked_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS graphql_settlement_facts_height_idx ON graphql_settlement_facts(height);
+  CREATE INDEX IF NOT EXISTS graphql_settlement_facts_day_idx ON graphql_settlement_facts(day);
+  CREATE INDEX IF NOT EXISTS indexed_heights_status_height_idx ON indexed_heights(status, height);
+
   CREATE INDEX IF NOT EXISTS settlement_facts_time_idx ON settlement_facts(block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_service_time_idx ON settlement_facts(service_id, block_time);
   CREATE INDEX IF NOT EXISTS settlement_facts_day_idx ON settlement_facts(day);
@@ -1116,6 +1151,33 @@ export function getBlockHeaderHeight(height: number): { block_time: number } | u
   try {
     return db.prepare("SELECT block_time FROM block_headers WHERE height = ?").get(height) as { block_time: number } | undefined;
   } catch { return undefined; }
+}
+
+export function upsertImportRange(phase: string, fromH: number, toH: number, status: string, headerCount: number, settlementCount: number, pageCount: number, attempt: number, cursor?: string, error?: string): void {
+  try {
+    db.prepare(`
+      INSERT INTO graphql_import_ranges (phase, from_height, to_height, status, header_count, settlement_count, page_count, attempts, last_cursor, last_error, started_at, committed_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `).run(phase, fromH, toH, status, headerCount, settlementCount, pageCount, attempt + 1, cursor ?? null, error ?? null);
+  } catch { }
+}
+
+export function getImportRangeStatus(phase: string, fromH: number, toH: number): string | null {
+  try {
+    const row = db.prepare("SELECT status FROM graphql_import_ranges WHERE phase=? AND from_height=? AND to_height=?").get(phase, fromH, toH) as { status: string } | undefined;
+    return row?.status ?? null;
+  } catch { return null; }
+}
+
+export function getImportRangeCounts(status: string): number {
+  try {
+    const row = db.prepare("SELECT COUNT(*) AS c FROM graphql_import_ranges WHERE status=?").get(status) as { c: number };
+    return row?.c ?? 0;
+  } catch { return 0; }
+}
+
+export function markImportRangeFailed(phase: string, fromH: number, toH: number, error: string, attempt: number): void {
+  upsertImportRange(phase, fromH, toH, "failed", 0, 0, 0, attempt, undefined, error);
 }
 
 export function getPartialWorkloadHeights(): number {

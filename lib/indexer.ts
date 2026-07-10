@@ -221,7 +221,7 @@ let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
-const INDEXER_DATA_VERSION = 4;
+const INDEXER_DATA_VERSION = 5;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
@@ -1310,6 +1310,14 @@ function backfillEmptyHeightMetadata(): void {
 async function runDataMigration(): Promise<void> {
   const storedVersion = Number(getIndexerState("data_version") ?? "0");
   if (storedVersion >= INDEXER_DATA_VERSION) return;
+
+  if (storedVersion === 4) {
+    // v5 is additive: graphql_import_ranges, graphql_reconciliation, indexes
+    // Already created by initializeDatabase(). No data transformation needed.
+    setIndexerState("data_version", String(INDEXER_DATA_VERSION));
+    logInfo("Data migration complete", { fromVersion: storedVersion, version: INDEXER_DATA_VERSION });
+    return;
+  }
 
   if (storedVersion === 3) {
     // v4 is an additive data-model migration. It must finish moving GraphQL

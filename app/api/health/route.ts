@@ -1,4 +1,5 @@
 import { getIndexerHealth, isDatabaseReadOnly } from "@/lib/db";
+import { getBootstrapProgress } from "@/lib/graphql-bootstrap";
 
 export const dynamic = "force-dynamic";
 
@@ -36,5 +37,6 @@ export async function GET() {
       lastSuccessfulCommit: health.lastSuccessfulCommit,
       lastBackup: health.lastBackup,
     },
+    graphqlBootstrap: getBootstrapProgress(),
   });
 }

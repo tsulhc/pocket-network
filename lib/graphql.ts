@@ -28,7 +28,7 @@ export type IndexedGraphQLSettlement = {
   settledAmount: string;
 };
 
-async function fetchGraphQL<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+export async function fetchGraphQL<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const response = await fetch(GRAPHQL_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -122,6 +122,7 @@ export type FetchBlocksResult = {
   settlements: IndexedGraphQLSettlement[];
   blocksFound: Set<number>;
   blockTimeByHeight: Map<number, number>;
+  pageCount: number;
 };
 
 export async function fetchSettlementsByBlockRange(
@@ -132,6 +133,7 @@ export async function fetchSettlementsByBlockRange(
   const blocksFound = new Set<number>();
   const blockTimeByHeight = new Map<number, number>();
   let from = fromHeight;
+  let pageCount = 0;
 
   while (from <= toHeight) {
     const batchTo = Math.min(from + 200, toHeight);
@@ -141,6 +143,7 @@ export async function fetchSettlementsByBlockRange(
       to: String(batchTo),
       cursor: null,
     });
+    pageCount++;
     for (const block of data.blocks.nodes) {
       const nested = block.eventClaimSettledsByBlockId;
       if (nested.pageInfo?.hasNextPage) {
@@ -173,7 +176,7 @@ export async function fetchSettlementsByBlockRange(
     from = batchTo + 1;
   }
 
-  return { settlements: results, blocksFound, blockTimeByHeight };
+  return { settlements: results, blocksFound, blockTimeByHeight, pageCount };
 }
 
 export async function fetchBlockHeadersByRange(fromHeight: number, toHeight: number): Promise<Map<number, number>> {
