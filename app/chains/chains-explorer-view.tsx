@@ -128,8 +128,7 @@ function getSupplierDensityLabel(service: SerializedServiceStats): string {
 function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServiceStats[]; totalRevenue: string }) {
   const eligibleServices = [...services]
     .sort(compareRevenueDesc)
-    .filter((service) => BigInt(service.revenueUpokt) > 0n || service.relays > 0);
-  const totalBig = BigInt(totalRevenue);
+    .filter((service) => BigInt(service.revenueUpokt) > 0n || service.relays > 0 || (service.computeUnits ?? 0) > 0);
   const totalRelays = eligibleServices.reduce((sum, s) => sum + s.relays, 0);
   const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
   const [pageSize, setPageSize] = useState<number>(10);
@@ -155,7 +154,7 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
           </div>
         </div>
       )}
-      {eligibleServices.map((service) => {
+      {visibleServices.map((service) => {
         const share = getShare(service.revenueUpokt, totalRevenue);
         const relayShare = totalRelays === 0 ? 0 : (service.relays / totalRelays) * 100;
         const density = (service.supplierCount ?? 0) <= 25 ? "low" : (service.supplierCount ?? 0) <= 75 ? "medium" : "high";

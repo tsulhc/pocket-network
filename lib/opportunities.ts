@@ -219,11 +219,10 @@ export function allocateSuppliersByMarginalReturn(
 
     top.gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), top.allocated);
 
-    if (top.gain <= 0n && heap.length === 1) break;
+    // Always allocate, even at zero gain. Never drop a candidate — this
+    // guarantees allocatedTotal === supplierCount. Tie-break by serviceId.
     if (top.gain <= 0n) {
-      heap[0] = heap[heap.length - 1];
-      heap.pop();
-      if (heap.length > 0) heapifyDown(0);
+      heapifyDown(0);
     } else {
       heapifyDown(0);
     }
