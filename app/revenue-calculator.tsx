@@ -87,7 +87,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
   }
 
   return (
-    <section className="panel section calculator-section themed section-theme-revenue" style={{ position: 'relative', overflow: 'hidden' }}>
+    <section id="calculator" className="panel section calculator-section themed section-theme-revenue" style={{ position: 'relative', overflow: 'hidden' }}>
       <div style={{ 
         position: 'absolute', 
         bottom: '-10%', 

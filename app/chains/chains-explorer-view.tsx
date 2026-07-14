@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 
 import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatPercent, formatUsd, formatUpokt } from "@/lib/format";
 import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS, SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
@@ -130,10 +130,22 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
     .sort(compareRevenueDesc)
     .filter((service) => BigInt(service.revenueUpokt) > 0n || service.relays > 0);
   const totalBig = BigInt(totalRevenue);
+  const totalRelays = eligibleServices.reduce((sum, s) => sum + s.relays, 0);
+  const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+  const [pageSize, setPageSize] = useState<number>(10);
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(eligibleServices.length / pageSize));
+  const visibleServices = eligibleServices.slice((page - 1) * pageSize, page * pageSize);
+
+  function handlePageSizeChange(newSize: number) {
+    setPageSize(newSize);
+    setPage(1);
+  }
 
   return (
+    <>
     <div className="demand-signal-grid">
-      {eligibleServices.length === 0 && (
+      {visibleServices.length === 0 && (
         <div className="demand-signal-card">
           <div className="demand-signal-head">
             <div>
@@ -145,6 +157,7 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
       )}
       {eligibleServices.map((service) => {
         const share = getShare(service.revenueUpokt, totalRevenue);
+        const relayShare = totalRelays === 0 ? 0 : (service.relays / totalRelays) * 100;
         const density = (service.supplierCount ?? 0) <= 25 ? "low" : (service.supplierCount ?? 0) <= 75 ? "medium" : "high";
         const revenuePerMillionRelays = getRevenuePerMillionRelays(service);
 
@@ -180,7 +193,7 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
               </div>
               <div>
                 <span>relay demand</span>
-                <div className="opportunity-track"><div className="opportunity-fill demand-fill-green" style={{ width: `${Math.min(100, Math.max(0, share))}%` }} /></div>
+                <div className="opportunity-track"><div className="opportunity-fill demand-fill-green" style={{ width: `${Math.min(100, Math.max(0, relayShare))}%` }} /></div>
               </div>
             </div>
 
@@ -193,6 +206,22 @@ function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServ
         );
       })}
     </div>
+
+    <div className="explorer-pagination" style={{ marginTop: '24px' }}>
+      <span className="muted">Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, eligibleServices.length)} of {formatInteger(eligibleServices.length)} services</span>
+      <div className="explorer-pagination-controls">
+        <span className="muted" style={{ marginRight: '12px' }}>Rows per page:</span>
+        {PAGE_SIZE_OPTIONS.map((size) => (
+          <button key={size} type="button" className={`pill ${pageSize === size ? 'active' : ''}`} onClick={() => handlePageSizeChange(size)}>
+            {size}
+          </button>
+        ))}
+        <button type="button" className="pill" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</button>
+        <span className="muted" style={{ margin: '0 8px' }}>Page {page} of {pageCount}</span>
+        <button type="button" className="pill" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</button>
+      </div>
+    </div>
+    </>
   );
 }
 
@@ -245,6 +274,8 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
     setPage(1);
   }
 
+  useEffect(() => { setPage(1); }, [query, sort, sortDirection, eligibleServices.length]);
+
   if (!data) {
     return (
       <main className="page">
@@ -283,7 +314,7 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
           </p>
         </div>
         
-        <div className="explorer-summary-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+        <div className="explorer-summary-grid explorer-summary-grid-four">
           <article className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
             <span className="hero-highlight-label">Active Chains</span>
             <strong style={{ color: 'var(--text)' }}>{formatInteger(data.activeChains)}</strong>

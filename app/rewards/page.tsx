@@ -4,7 +4,7 @@ import { formatCompactUpokt, formatCompactUsd, formatDecimal, formatInteger, for
 import { getDashboardDataSafe, getNetworkDailyHistoryLocal } from "@/lib/pocket";
 
 export const metadata = {
-  title: "Rewards Calculator | Kleomedes",
+  title: "Rewards Calculator | Pocket Network Analytics",
   description: "Pocket Network reward trends and provider growth calculator."
 };
 
@@ -61,9 +61,10 @@ export default async function RewardsPage() {
   }
 
   const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
+  const providersByRevenue = [...data.providers].sort(compareRevenueDesc);
   const topService = servicesByRevenue[0];
   const averageReward = data.activeProviders === 0 ? 0 : toPoktNumber(data.totalRevenueUpokt) / data.activeProviders;
-  const top5ProviderRewards = servicesByRevenue.slice(0, 5).reduce((sum, service) => sum + service.revenueUpokt, 0n);
+  const top5ProviderRewards = providersByRevenue.slice(0, 5).reduce((sum, provider) => sum + provider.revenueUpokt, 0n);
   const rewardHistoryValues = history.map((point) => toPoktNumber(point.revenueUpokt));
   const rewardHistoryAverage = movingAverage(rewardHistoryValues, 7);
   const rewardHistoryPoints = history.map((point, index) => ({
@@ -117,7 +118,7 @@ export default async function RewardsPage() {
         <article className="panel kpi">
           <span className="kpi-label">Top 5 Concentration</span>
           <span className="kpi-value" style={{ color: 'var(--accent)' }}>{formatPercent(getShare(top5ProviderRewards, data.totalRevenueUpokt), 1)}</span>
-          <span className="kpi-foot">Share of top 5 services</span>
+          <span className="kpi-foot">Share of top 5 entities</span>
         </article>
         <article className="panel kpi">
           <span className="kpi-label">Top Service Share</span>

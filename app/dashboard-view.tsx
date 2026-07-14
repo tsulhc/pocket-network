@@ -396,12 +396,11 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
                   <strong>{topService ? topService.serviceName : "n/a"}</strong> is the top reward chain in this period.
                 </li>
                 <li>
-                  {data.totalEstimatedComputeUnits > 0 ? (
+                  {data.totalEstimatedComputeUnits > 0 && cuCoverageComplete ? (
                     <><strong>{formatDecimal((() => { const r = toPoktNumber(data.totalRevenueUpokt); return data.totalEstimatedComputeUnits > 0 ? (r / data.totalEstimatedComputeUnits) * 1_000_000_000 : 0; })(), 2)} POKT</strong> (${formatUsd((() => { const r = toPoktNumber(data.totalRevenueUpokt); return data.totalEstimatedComputeUnits > 0 ? (r / data.totalEstimatedComputeUnits) * 1_000_000_000 : 0; })() * data.poktPriceUsd, 2)}) earned per 1B estimated compute units.
-                    {!cuCoverageComplete && <em className="muted"> Based on partial CU coverage</em>}
                     </>
                   ) : (
-                    <>Compute units are currently unavailable.</>
+                    <>POKT per 1B CU: n/a. Compute-unit coverage is incomplete.</>
                   )}
                 </li>
                 <li>

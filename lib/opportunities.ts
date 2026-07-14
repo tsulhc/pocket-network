@@ -171,6 +171,8 @@ export function allocateSuppliersByMarginalReturn(
     return allocation;
   }
 
+  const serviceById = new Map(services.map((s) => [s.serviceId, s]));
+
   type HeapEntry = { serviceId: string; gain: bigint; allocated: number };
   const heap: HeapEntry[] = [];
 
@@ -180,7 +182,6 @@ export function allocateSuppliersByMarginalReturn(
     heap.push({ serviceId: service.serviceId, gain, allocated: 0 });
   }
 
-  // Build max-heap
   function heapifyDown(index: number): void {
     const size = heap.length;
     let largest = index;
@@ -213,13 +214,13 @@ export function allocateSuppliersByMarginalReturn(
     allocation.set(top.serviceId, top.allocated);
     remaining--;
 
-    // Recompute gain
-    const service = services.find((s) => s.serviceId === top.serviceId);
+    const service = serviceById.get(top.serviceId);
     if (!service) break;
+
     top.gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), top.allocated);
 
+    if (top.gain <= 0n && heap.length === 1) break;
     if (top.gain <= 0n) {
-      // Remove from heap
       heap[0] = heap[heap.length - 1];
       heap.pop();
       if (heap.length > 0) heapifyDown(0);
