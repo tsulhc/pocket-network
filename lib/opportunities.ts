@@ -171,28 +171,61 @@ export function allocateSuppliersByMarginalReturn(
     return allocation;
   }
 
+  type HeapEntry = { serviceId: string; gain: bigint; allocated: number };
+  const heap: HeapEntry[] = [];
+
   for (const service of services) {
     allocation.set(service.serviceId, 0);
+    const gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), 0);
+    heap.push({ serviceId: service.serviceId, gain, allocated: 0 });
   }
 
-  for (let index = 0; index < supplierCount; index += 1) {
-    let bestService: OpportunityService | null = null;
-    let bestGain = -1n;
-
-    for (const service of services) {
-      const allocated = allocation.get(service.serviceId) ?? 0;
-      const gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), allocated);
-      if (!bestService || gain > bestGain) {
-        bestService = service;
-        bestGain = gain;
-      }
+  // Build max-heap
+  function heapifyDown(index: number): void {
+    const size = heap.length;
+    let largest = index;
+    while (true) {
+      const left = 2 * index + 1;
+      const right = 2 * index + 2;
+      if (left < size && (heap[left].gain > heap[largest].gain || (heap[left].gain === heap[largest].gain && heap[left].serviceId < heap[largest].serviceId))) largest = left;
+      if (right < size && (heap[right].gain > heap[largest].gain || (heap[right].gain === heap[largest].gain && heap[right].serviceId < heap[largest].serviceId))) largest = right;
+      if (largest === index) break;
+      [heap[index], heap[largest]] = [heap[largest], heap[index]];
+      index = largest;
     }
+  }
 
-    if (!bestService) {
-      break;
+  function heapifyUp(index: number): void {
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (heap[index].gain < heap[parent].gain || (heap[index].gain === heap[parent].gain && heap[index].serviceId > heap[parent].serviceId)) break;
+      [heap[index], heap[parent]] = [heap[parent], heap[index]];
+      index = parent;
     }
+  }
 
-    allocation.set(bestService.serviceId, (allocation.get(bestService.serviceId) ?? 0) + 1);
+  for (let i = Math.floor(heap.length / 2) - 1; i >= 0; i--) heapifyDown(i);
+
+  let remaining = supplierCount;
+  while (remaining > 0 && heap.length > 0) {
+    const top = heap[0];
+    top.allocated += 1;
+    allocation.set(top.serviceId, top.allocated);
+    remaining--;
+
+    // Recompute gain
+    const service = services.find((s) => s.serviceId === top.serviceId);
+    if (!service) break;
+    top.gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), top.allocated);
+
+    if (top.gain <= 0n) {
+      // Remove from heap
+      heap[0] = heap[heap.length - 1];
+      heap.pop();
+      if (heap.length > 0) heapifyDown(0);
+    } else {
+      heapifyDown(0);
+    }
   }
 
   return allocation;
