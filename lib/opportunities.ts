@@ -173,13 +173,17 @@ export function allocateSuppliersByMarginalReturn(
 
   const serviceById = new Map(services.map((s) => [s.serviceId, s]));
 
-  type HeapEntry = { serviceId: string; gain: bigint; allocated: number };
+  type HeapEntry = { serviceId: string; order: number; gain: bigint; allocated: number };
   const heap: HeapEntry[] = [];
 
-  for (const service of services) {
+  services.forEach((service, order) => {
     allocation.set(service.serviceId, 0);
     const gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), 0);
-    heap.push({ serviceId: service.serviceId, gain, allocated: 0 });
+    heap.push({ serviceId: service.serviceId, order, gain, allocated: 0 });
+  });
+
+  function higherPriority(a: HeapEntry, b: HeapEntry): boolean {
+    return a.gain > b.gain || (a.gain === b.gain && a.order < b.order);
   }
 
   function heapifyDown(index: number): void {
@@ -188,8 +192,8 @@ export function allocateSuppliersByMarginalReturn(
     while (true) {
       const left = 2 * index + 1;
       const right = 2 * index + 2;
-      if (left < size && (heap[left].gain > heap[largest].gain || (heap[left].gain === heap[largest].gain && heap[left].serviceId < heap[largest].serviceId))) largest = left;
-      if (right < size && (heap[right].gain > heap[largest].gain || (heap[right].gain === heap[largest].gain && heap[right].serviceId < heap[largest].serviceId))) largest = right;
+      if (left < size && higherPriority(heap[left], heap[largest])) largest = left;
+      if (right < size && higherPriority(heap[right], heap[largest])) largest = right;
       if (largest === index) break;
       [heap[index], heap[largest]] = [heap[largest], heap[index]];
       index = largest;
@@ -199,7 +203,7 @@ export function allocateSuppliersByMarginalReturn(
   function heapifyUp(index: number): void {
     while (index > 0) {
       const parent = Math.floor((index - 1) / 2);
-      if (heap[index].gain < heap[parent].gain || (heap[index].gain === heap[parent].gain && heap[index].serviceId > heap[parent].serviceId)) break;
+      if (!higherPriority(heap[index], heap[parent])) break;
       [heap[index], heap[parent]] = [heap[parent], heap[index]];
       index = parent;
     }
