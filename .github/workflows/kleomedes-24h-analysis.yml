@@ -1,0 +1,434 @@
+name: Kleomedes 24h analysis
+
+on:
+  push:
+    branches:
+      - analysis/kleomedes-24h-2026-07-28
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Query Pocket indexer and build report
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections
+          import datetime as dt
+          import json
+          import math
+          import statistics
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          GRAPHQL_URL = "https://data.pocket.network/"
+          REST_URL = "https://sauron-api.infra.pocket.network"
+          KLEOMEDES_DOMAIN = "kleomedes.network"
+          HEADERS = {
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+              "User-Agent": "kleomedes-analytics-research/0.1",
+          }
+
+          def request_json(url, *, payload=None, timeout=90):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(url, data=data, headers=HEADERS)
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return json.load(response)
+
+          def gql(query, variables=None):
+              body = request_json(
+                  GRAPHQL_URL,
+                  payload={"query": query, "variables": variables or {}},
+              )
+              if body.get("errors"):
+                  raise RuntimeError(body["errors"])
+              return body["data"]
+
+          def paginated_rest(path, collection):
+              output = []
+              next_key = ""
+              while True:
+                  params = {"dehydrated": "false", "pagination.limit": "200"}
+                  if next_key:
+                      params["pagination.key"] = next_key
+                  url = f"{REST_URL}{path}?{urllib.parse.urlencode(params)}"
+                  body = request_json(url)
+                  output.extend(body.get(collection) or [])
+                  next_key = ((body.get("pagination") or {}).get("next_key") or "")
+                  if not next_key:
+                      return output
+
+          def registrable_domain(host):
+              host = (host or "").lower().strip(".")
+              if not host:
+                  return None
+              labels = [part for part in host.split(".") if part]
+              if len(labels) <= 2:
+                  return host
+              second_level = {"co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"}
+              suffix = ".".join(labels[-2:])
+              return ".".join(labels[-3:]) if suffix in second_level else suffix
+
+          def endpoint_domain(url):
+              if not url:
+                  return None
+              normalized = url if "://" in url else f"https://{url}"
+              try:
+                  return registrable_domain(urllib.parse.urlparse(normalized).hostname)
+              except Exception:
+                  return None
+
+          def parse_int(value):
+              if value is None:
+                  return 0
+              return int(str(value).split(".", 1)[0] or "0")
+
+          def pokt(upokt):
+              return upokt / 1_000_000
+
+          metadata = gql("""
+            query Metadata {
+              _metadata {
+                targetHeight
+                lastProcessedHeight
+                lastProcessedTimestamp
+                lastFinalizedVerifiedHeight
+                indexerHealthy
+              }
+            }
+          """)["_metadata"]
+
+          # The indexer's supplier table carries explicit domains. It is the same
+          # source used by the former named-provider implementation.
+          supplier_domains = {}
+          offset = 0
+          while True:
+              page = gql("""
+                query Suppliers($offset: Int!) {
+                  suppliers(first: 200, offset: $offset) {
+                    nodes {
+                      id
+                      ownerId
+                      operatorId
+                      serviceConfigs(first: 100) {
+                        nodes {
+                          domains
+                          endpoints
+                        }
+                      }
+                    }
+                  }
+                }
+              """, {"offset": offset})["suppliers"]["nodes"]
+              if not page:
+                  break
+              for supplier in page:
+                  domains = []
+                  endpoint_urls = []
+                  for config in ((supplier.get("serviceConfigs") or {}).get("nodes") or []):
+                      if not config:
+                          continue
+                      domains.extend(config.get("domains") or [])
+                      endpoints = config.get("endpoints") or []
+                      if isinstance(endpoints, list):
+                          for endpoint in endpoints:
+                              if isinstance(endpoint, dict):
+                                  endpoint_urls.append(endpoint.get("url"))
+                              elif isinstance(endpoint, str):
+                                  endpoint_urls.append(endpoint)
+                  normalized = sorted({str(domain).lower() for domain in domains if domain})
+                  if normalized:
+                      provider = normalized[0]
+                  else:
+                      candidates = [endpoint_domain(url) for url in endpoint_urls]
+                      candidates = [candidate for candidate in candidates if candidate]
+                      provider = collections.Counter(candidates).most_common(1)[0][0] if candidates else f"owner:{supplier.get('ownerId') or supplier['operatorId']}"
+                  supplier_domains[supplier["operatorId"]] = provider
+              offset += len(page)
+
+          services_raw = paginated_rest("/pokt-network/poktroll/service/service", "service")
+          services = {}
+          for service in services_raw:
+              service_id = service.get("id")
+              if not service_id:
+                  continue
+              cu = service.get("compute_units_per_relay", service.get("computeUnitsPerRelay"))
+              services[service_id] = {
+                  "name": service.get("name") or service_id,
+                  "compute_units_per_relay": parse_int(cu),
+              }
+
+          suppliers_raw = paginated_rest("/pokt-network/poktroll/supplier/supplier", "supplier")
+          configured_by_supplier = {}
+          staked_supplier_count_by_service = collections.Counter()
+          supplier_meta = {}
+          for supplier in suppliers_raw:
+              operator = supplier.get("operator_address")
+              owner = supplier.get("owner_address")
+              if not operator:
+                  continue
+              service_ids = sorted({entry.get("service_id") for entry in (supplier.get("services") or []) if entry.get("service_id")})
+              configured_by_supplier[operator] = service_ids
+              for service_id in service_ids:
+                  staked_supplier_count_by_service[service_id] += 1
+              endpoint_urls = [
+                  endpoint.get("url")
+                  for entry in (supplier.get("services") or [])
+                  for endpoint in (entry.get("endpoints") or [])
+                  if isinstance(endpoint, dict)
+              ]
+              if operator not in supplier_domains:
+                  candidates = [endpoint_domain(url) for url in endpoint_urls]
+                  candidates = [candidate for candidate in candidates if candidate]
+                  supplier_domains[operator] = collections.Counter(candidates).most_common(1)[0][0] if candidates else f"owner:{owner or operator}"
+              supplier_meta[operator] = {
+                  "owner": owner,
+                  "stake_upokt": parse_int((supplier.get("stake") or {}).get("amount")),
+                  "services": service_ids,
+              }
+
+          now = dt.datetime.now(dt.timezone.utc)
+          start = now - dt.timedelta(hours=24)
+          claims = gql("""
+            query Claims24h($start: Datetime!) {
+              status: _metadata {
+                targetHeight
+                lastProcessedHeight
+                lastProcessedTimestamp
+                lastFinalizedVerifiedHeight
+                indexerHealthy
+              }
+              claims: eventClaimSettleds(
+                filter: {
+                  block: {
+                    timestamp: { greaterThanOrEqualTo: $start }
+                  }
+                }
+              ) {
+                groupedAggregates(groupBy: [SUPPLIER_ID, SERVICE_ID]) {
+                  keys
+                  sum {
+                    claimedAmount
+                    numRelays
+                  }
+                }
+              }
+            }
+          """, {"start": start.isoformat().replace("+00:00", "Z")})
+
+          rows = []
+          for aggregate in claims["claims"]["groupedAggregates"] or []:
+              keys = aggregate.get("keys") or []
+              if len(keys) < 2:
+                  continue
+              supplier_id, service_id = keys[0], keys[1]
+              sums = aggregate.get("sum") or {}
+              reward_upokt = parse_int(sums.get("claimedAmount"))
+              relays = parse_int(sums.get("numRelays"))
+              if reward_upokt <= 0 and relays <= 0:
+                  continue
+              provider = supplier_domains.get(supplier_id, f"supplier:{supplier_id}")
+              rows.append({
+                  "supplier": supplier_id,
+                  "provider": provider,
+                  "service_id": service_id,
+                  "service_name": (services.get(service_id) or {}).get("name", service_id),
+                  "reward_upokt": reward_upokt,
+                  "relays": relays,
+                  "compute_units": relays * (services.get(service_id) or {}).get("compute_units_per_relay", 0),
+              })
+
+          provider_totals = collections.defaultdict(lambda: {"reward_upokt": 0, "relays": 0, "compute_units": 0, "suppliers": set(), "services": set()})
+          service_totals = collections.defaultdict(lambda: {"reward_upokt": 0, "relays": 0, "compute_units": 0, "suppliers": set(), "providers": set()})
+          provider_service = collections.defaultdict(lambda: {"reward_upokt": 0, "relays": 0, "compute_units": 0, "suppliers": set()})
+          for row in rows:
+              p = provider_totals[row["provider"]]
+              p["reward_upokt"] += row["reward_upokt"]
+              p["relays"] += row["relays"]
+              p["compute_units"] += row["compute_units"]
+              p["suppliers"].add(row["supplier"])
+              p["services"].add(row["service_id"])
+
+              s = service_totals[row["service_id"]]
+              s["reward_upokt"] += row["reward_upokt"]
+              s["relays"] += row["relays"]
+              s["compute_units"] += row["compute_units"]
+              s["suppliers"].add(row["supplier"])
+              s["providers"].add(row["provider"])
+
+              ps = provider_service[(row["provider"], row["service_id"])]
+              ps["reward_upokt"] += row["reward_upokt"]
+              ps["relays"] += row["relays"]
+              ps["compute_units"] += row["compute_units"]
+              ps["suppliers"].add(row["supplier"])
+
+          network_reward = sum(item["reward_upokt"] for item in provider_totals.values())
+          network_relays = sum(item["relays"] for item in provider_totals.values())
+          provider_order = sorted(provider_totals, key=lambda key: (-provider_totals[key]["reward_upokt"], key))
+          relay_order = sorted(provider_totals, key=lambda key: (-provider_totals[key]["relays"], key))
+          kleo = provider_totals.get(KLEOMEDES_DOMAIN, {"reward_upokt": 0, "relays": 0, "compute_units": 0, "suppliers": set(), "services": set()})
+
+          kleo_operators = sorted(operator for operator, provider in supplier_domains.items() if provider == KLEOMEDES_DOMAIN)
+          kleo_configured_services = sorted({service for operator in kleo_operators for service in configured_by_supplier.get(operator, [])})
+
+          providers_report = []
+          for provider in provider_order:
+              totals = provider_totals[provider]
+              providers_report.append({
+                  "provider": provider,
+                  "reward_pokt": pokt(totals["reward_upokt"]),
+                  "reward_share_pct": 100 * totals["reward_upokt"] / network_reward if network_reward else 0,
+                  "relays": totals["relays"],
+                  "compute_units": totals["compute_units"],
+                  "earning_suppliers": len(totals["suppliers"]),
+                  "earning_services": len(totals["services"]),
+              })
+
+          kleo_services_report = []
+          for service_id in sorted(kleo["services"], key=lambda sid: -provider_service[(KLEOMEDES_DOMAIN, sid)]["reward_upokt"]):
+              own = provider_service[(KLEOMEDES_DOMAIN, service_id)]
+              market = service_totals[service_id]
+              competitors = sorted(
+                  ((provider, provider_service[(provider, service_id)]["reward_upokt"]) for provider in market["providers"]),
+                  key=lambda item: (-item[1], item[0]),
+              )
+              rank = next(index + 1 for index, item in enumerate(competitors) if item[0] == KLEOMEDES_DOMAIN)
+              kleo_services_report.append({
+                  "service_id": service_id,
+                  "service_name": (services.get(service_id) or {}).get("name", service_id),
+                  "reward_pokt": pokt(own["reward_upokt"]),
+                  "network_reward_pokt": pokt(market["reward_upokt"]),
+                  "market_share_pct": 100 * own["reward_upokt"] / market["reward_upokt"] if market["reward_upokt"] else 0,
+                  "provider_rank": rank,
+                  "active_providers": len(market["providers"]),
+                  "relays": own["relays"],
+                  "network_relays": market["relays"],
+                  "earning_suppliers": len(own["suppliers"]),
+              })
+
+          opportunities = []
+          for service_id, market in service_totals.items():
+              if service_id in kleo_configured_services or market["reward_upokt"] <= 0:
+                  continue
+              active_providers = len(market["providers"])
+              active_suppliers = len(market["suppliers"])
+              reward_pokt = pokt(market["reward_upokt"])
+              per_provider = reward_pokt / active_providers if active_providers else 0
+              per_earning_supplier = reward_pokt / active_suppliers if active_suppliers else 0
+              # A transparent prioritisation signal, not a revenue forecast:
+              # favour large pools, few provider domains and demonstrated relay demand.
+              score = per_provider * math.log10(max(market["relays"], 10)) / math.sqrt(max(active_suppliers, 1))
+              opportunities.append({
+                  "service_id": service_id,
+                  "service_name": (services.get(service_id) or {}).get("name", service_id),
+                  "network_reward_pokt": reward_pokt,
+                  "network_relays": market["relays"],
+                  "network_compute_units": market["compute_units"],
+                  "active_providers": active_providers,
+                  "earning_suppliers": active_suppliers,
+                  "staked_suppliers": staked_supplier_count_by_service.get(service_id, 0),
+                  "reward_per_active_provider_pokt": per_provider,
+                  "reward_per_earning_supplier_pokt": per_earning_supplier,
+                  "screening_score": score,
+              })
+          opportunities.sort(key=lambda item: (-item["screening_score"], -item["network_reward_pokt"], item["service_id"]))
+
+          provider_rewards = [pokt(provider_totals[key]["reward_upokt"]) for key in provider_totals]
+          report = {
+              "generated_at": now.isoformat(),
+              "window_start": start.isoformat(),
+              "window_end": now.isoformat(),
+              "indexer": claims["status"],
+              "network": {
+                  "reward_pokt": pokt(network_reward),
+                  "relays": network_relays,
+                  "active_providers": len(provider_totals),
+                  "median_provider_reward_pokt": statistics.median(provider_rewards) if provider_rewards else 0,
+              },
+              "kleomedes": {
+                  "provider_domain": KLEOMEDES_DOMAIN,
+                  "reward_pokt": pokt(kleo["reward_upokt"]),
+                  "reward_share_pct": 100 * kleo["reward_upokt"] / network_reward if network_reward else 0,
+                  "reward_rank": provider_order.index(KLEOMEDES_DOMAIN) + 1 if KLEOMEDES_DOMAIN in provider_order else None,
+                  "relay_rank": relay_order.index(KLEOMEDES_DOMAIN) + 1 if KLEOMEDES_DOMAIN in relay_order else None,
+                  "relays": kleo["relays"],
+                  "compute_units": kleo["compute_units"],
+                  "earning_suppliers": len(kleo["suppliers"]),
+                  "earning_services": len(kleo["services"]),
+                  "known_operators": kleo_operators,
+                  "configured_services": kleo_configured_services,
+                  "services": kleo_services_report,
+              },
+              "providers": providers_report,
+              "opportunities_not_configured": opportunities,
+          }
+
+          Path("artifacts").mkdir(exist_ok=True)
+          Path("artifacts/kleomedes-24h.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+
+          def fmt(value, digits=1):
+              return f"{value:,.{digits}f}"
+
+          md = []
+          md.append("# Kleomedes Pocket — rolling 24-hour analysis")
+          md.append("")
+          md.append(f"Window: `{report['window_start']}` → `{report['window_end']}`")
+          md.append(f"Indexer height: `{report['indexer'].get('lastProcessedHeight')}` / `{report['indexer'].get('targetHeight')}`; healthy: `{report['indexer'].get('indexerHealthy')}`")
+          md.append("")
+          md.append("## Kleomedes versus network")
+          md.append("")
+          md.append("| Metric | Kleomedes | Network / benchmark |")
+          md.append("|---|---:|---:|")
+          md.append(f"| Rewards | {fmt(report['kleomedes']['reward_pokt'], 2)} POKT | {fmt(report['network']['reward_pokt'], 2)} POKT |")
+          md.append(f"| Reward share | {fmt(report['kleomedes']['reward_share_pct'], 3)}% | 100% |")
+          md.append(f"| Reward rank | {report['kleomedes']['reward_rank']} | {report['network']['active_providers']} active providers |")
+          md.append(f"| Finalized relays | {report['kleomedes']['relays']:,} | {report['network']['relays']:,} |")
+          md.append(f"| Relay rank | {report['kleomedes']['relay_rank']} | {report['network']['active_providers']} active providers |")
+          md.append(f"| Median provider rewards | — | {fmt(report['network']['median_provider_reward_pokt'], 2)} POKT |")
+          md.append(f"| Earning suppliers | {report['kleomedes']['earning_suppliers']} | — |")
+          md.append(f"| Earning services | {report['kleomedes']['earning_services']} | — |")
+          md.append("")
+          md.append("## Kleomedes service performance")
+          md.append("")
+          md.append("| Service | Rewards | Share | Rank | Providers | Relays |")
+          md.append("|---|---:|---:|---:|---:|---:|")
+          for item in report["kleomedes"]["services"]:
+              md.append(f"| {item['service_name']} (`{item['service_id']}`) | {fmt(item['reward_pokt'], 2)} | {fmt(item['market_share_pct'], 2)}% | {item['provider_rank']} | {item['active_providers']} | {item['relays']:,} |")
+          md.append("")
+          md.append("## Highest-screening services not configured by Kleomedes")
+          md.append("")
+          md.append("Equal-provider and equal-supplier values are market benchmarks, not forecasts.")
+          md.append("")
+          md.append("| Service | Pool | Relays | Providers | Earning suppliers | Staked suppliers | Pool / provider | Pool / earning supplier |")
+          md.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+          for item in report["opportunities_not_configured"][:20]:
+              md.append(f"| {item['service_name']} (`{item['service_id']}`) | {fmt(item['network_reward_pokt'], 2)} | {item['network_relays']:,} | {item['active_providers']} | {item['earning_suppliers']} | {item['staked_suppliers']} | {fmt(item['reward_per_active_provider_pokt'], 2)} | {fmt(item['reward_per_earning_supplier_pokt'], 4)} |")
+          md.append("")
+          md.append("## Provider ranking")
+          md.append("")
+          md.append("| Rank | Provider | Rewards | Share | Relays | Suppliers | Services |")
+          md.append("|---:|---|---:|---:|---:|---:|---:|")
+          for rank, item in enumerate(report["providers"], 1):
+              md.append(f"| {rank} | `{item['provider']}` | {fmt(item['reward_pokt'], 2)} | {fmt(item['reward_share_pct'], 2)}% | {item['relays']:,} | {item['earning_suppliers']} | {item['earning_services']} |")
+
+          Path("artifacts/kleomedes-24h.md").write_text("\n".join(md) + "\n")
+          print("\n".join(md))
+          PY
+
+      - name: Upload analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: kleomedes-24h-analysis
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
