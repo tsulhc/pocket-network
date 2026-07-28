@@ -1,0 +1,1 @@
+Trigger the temporary 24-hour research workflow after PR creation.
